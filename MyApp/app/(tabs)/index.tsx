@@ -1,19 +1,19 @@
 import { View, Text, TouchableOpacity, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MapPin, Navigation, BusFront, User } from "lucide-react-native";
-import { useTheme } from "../ThemeContext"; // ✅ Dark Mode Edit
+import { useTheme } from "../ThemeContext";
 
 export default function HomeScreen() {
-  const { darkMode } = useTheme(); // ✅ Dark Mode Edit
+  const { darkMode } = useTheme(); 
 
   return (
     <SafeAreaView
-      className={`flex-1 ${darkMode ? 'bg-black' : 'bg-[#F9FAFB]'}`} // ✅ Dark Mode Edit
+      className={`flex-1 ${darkMode ? 'bg-black' : 'bg-[#F9FAFB]'}`} 
     >
       {/* Header */}
       <View className="px-5 pt-4 pb-2 flex-row items-center justify-between">
         <Text
-          className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-green-700'}`} // ✅ Dark Mode Edit
+          className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-green-700'}`} 
         >
           JeepRoute
         </Text>
@@ -25,20 +25,20 @@ export default function HomeScreen() {
       {/* Map Preview */}
       <View
         className={`mx-5 mt-2 mb-4 h-52 rounded-2xl items-center justify-center ${
-          darkMode ? 'bg-gray-800' : 'bg-green-100' // ✅ Dark Mode Edit
+          darkMode ? 'bg-gray-800' : 'bg-green-100' 
         }`}
       >
         <MapPin color={darkMode ? "#9AE6B4" : "#166534"} size={50} /> {/* ✅ Dark Mode Edit */}
         <Text
           className={`mt-2 text-base font-medium ${
-            darkMode ? 'text-white' : 'text-green-800' // ✅ Dark Mode Edit
+            darkMode ? 'text-white' : 'text-green-800' 
           }`}
         >
           Baguio City
         </Text>
         <Text
           className={`text-xs ${
-            darkMode ? 'text-gray-300' : 'text-gray-500' // ✅ Dark Mode Edit
+            darkMode ? 'text-gray-300' : 'text-gray-500' 
           }`}
         >
           Your current location
@@ -49,7 +49,7 @@ export default function HomeScreen() {
       <ScrollView className="px-5">
         <Text
           className={`text-lg font-semibold mb-3 ${
-            darkMode ? 'text-white' : 'text-gray-800' // ✅ Dark Mode Edit
+            darkMode ? 'text-white' : 'text-gray-800' 
           }`}
         >
           Jeeps Nearby
@@ -58,20 +58,20 @@ export default function HomeScreen() {
         {/* Jeep Card */}
         <View
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
-            darkMode ? 'bg-gray-800' : 'bg-white' // ✅ Dark Mode Edit
+            darkMode ? 'bg-gray-800' : 'bg-white' 
           }`}
         >
           <View>
             <Text
               className={`text-base font-semibold ${
-                darkMode ? 'text-green-400' : 'text-green-700' // ✅ Dark Mode Edit
+                darkMode ? 'text-green-400' : 'text-green-700'
               }`}
             >
               Jeep
             </Text>
             <Text
               className={`text-xs ${
-                darkMode ? 'text-gray-300' : 'text-gray-500' // ✅ Dark Mode Edit
+                darkMode ? 'text-gray-300' : 'text-gray-500' 
               }`}
             >
               ETA: 3 mins
@@ -83,20 +83,20 @@ export default function HomeScreen() {
         {/* Repeat Jeep Card */}
         <View
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
-            darkMode ? 'bg-gray-800' : 'bg-white' // ✅ Dark Mode Edit
+            darkMode ? 'bg-gray-800' : 'bg-white' 
           }`}
         >
           <View>
             <Text
               className={`text-base font-semibold ${
-                darkMode ? 'text-green-400' : 'text-green-700' // ✅ Dark Mode Edit
+                darkMode ? 'text-green-400' : 'text-green-700' 
               }`}
             >
               Jeep
             </Text>
             <Text
               className={`text-xs ${
-                darkMode ? 'text-gray-300' : 'text-gray-500' // ✅ Dark Mode Edit
+                darkMode ? 'text-gray-300' : 'text-gray-500'
               }`}
             >
               ETA: 5 mins
@@ -107,20 +107,20 @@ export default function HomeScreen() {
 
         <View
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
-            darkMode ? 'bg-gray-800' : 'bg-white' // ✅ Dark Mode Edit
+            darkMode ? 'bg-gray-800' : 'bg-white'
           }`}
         >
           <View>
             <Text
               className={`text-base font-semibold ${
-                darkMode ? 'text-green-400' : 'text-green-700' // ✅ Dark Mode Edit
+                darkMode ? 'text-green-400' : 'text-green-700' 
               }`}
             >
               Jeep
             </Text>
             <Text
               className={`text-xs ${
-                darkMode ? 'text-gray-300' : 'text-gray-500' // ✅ Dark Mode Edit
+                darkMode ? 'text-gray-300' : 'text-gray-500' 
               }`}
             >
               ETA: 7 mins

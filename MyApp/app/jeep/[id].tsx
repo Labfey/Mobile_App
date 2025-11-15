@@ -3,9 +3,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams } from "expo-router";
 
 const jeepneys = {
-  "1": { route: "Trancoville – Centro", plate: "ABC-1234", driver: "Mang Juan", capacity: 18 },
-  "2": { route: "Aurora Hill – Plaza", plate: "XYZ-5678", driver: "Mang Bert", capacity: 16 },
-  "3": { route: "Loakan – Session", plate: "JKL-9101", driver: "Mang Tomas", capacity: 20 },
+  "1": { route: "Jeep 1", plate: "ABC-1234", driver: "Mang Tomas",},
+  "2": { route: "Jeep 2", plate: "XYZ-5678", driver: "Mang Tomas",},
+  "3": { route: "Jeep 3", plate: "JKL-9101", driver: "Mang Tomas",},
 };
 
 export default function JeepProfile() {
@@ -32,7 +32,7 @@ export default function JeepProfile() {
       </View>
 
       <Text className="text-lg text-gray-600">
-        You can add more details here, like estimwated arrival times, location tracking, or fare.
+        Lorem ipsum dolor sit amet consectetur, adipisicing elit. Eum itaque ullam soluta, consectetur est eos ipsam nobis earum eius dignissimos qui voluptatibus. Nisi laudantium facilis, consequuntur quam cum non voluptas.
       </Text>
     </SafeAreaView>
   );
