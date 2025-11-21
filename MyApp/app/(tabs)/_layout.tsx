@@ -46,6 +46,15 @@ function TabLayout() {
           ),
         }}
       />
+        <Tabs.Screen
+        name="map"
+        options={{
+          title: "Map",
+          tabBarIcon: ({ color }) => (
+            <FontAwesome name="map" size={26} color={color} />
+          ),
+        }}
+      />
 
       <Tabs.Screen
         name="jeepInfo"
@@ -76,6 +85,7 @@ function TabLayout() {
           ),
         }}
       />
+
 
       {/* Hidden dynamic route — no tab bar icon */}
       <Tabs.Screen
