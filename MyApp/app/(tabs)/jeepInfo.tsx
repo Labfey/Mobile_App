@@ -4,9 +4,9 @@ import { Link } from "expo-router";
 import { BusFront } from "lucide-react-native";
 
 const jeepneys = [
-  { id: "1", route: "Trancoville – Centro", plate: "ABC-1234", driver: "Mang Juan" },
-  { id: "2", route: "Aurora Hill – Plaza", plate: "XYZ-5678", driver: "Mang Bert" },
-  { id: "3", route: "Loakan – Session", plate: "JKL-9101", driver: "Mang Tomas" },
+  { id: "1", route: "Balacbac – Town", plate: "ABC-1234", driver: "Mang Juan" },
+  { id: "2", route: "Balacbac – Town", plate: "XYZ-5678", driver: "Mang Bert" },
+  { id: "3", route: "Balacbac – Town", plate: "JKL-9101", driver: "Mang Tomas" },
 ];
 
 export default function JeepInfoScreen() {
