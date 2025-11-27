@@ -3,6 +3,16 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import React from "react";
 import { useTheme } from "../ThemeContext";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
+import { ComponentProps } from "react";
+
+type FontAwesomeName = ComponentProps<typeof FontAwesome>['name'];
+
+interface SettingsRowProps{
+  icon: FontAwesomeName;
+  label: string;
+  color: string;
+  bg: string;
+}
 
 export default function Profile() {
   const { darkMode } = useTheme();
@@ -150,9 +160,7 @@ export default function Profile() {
   );
 }
 
-/* ------ COMPONENT: Settings Row ------- */
-
-function SettingsRow({ icon, label, color, bg }) {
+function SettingsRow({ icon, label, color, bg }: SettingsRowProps) {
   return (
     <TouchableOpacity
       style={{
