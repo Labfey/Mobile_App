@@ -1,18 +1,21 @@
 import React, { useEffect, useRef, useState } from "react";
 import { View, StyleSheet, ActivityIndicator, Text } from "react-native";
-import MapView, { Marker, UrlTile } from "react-native-maps";
+import MapView, { Marker, UrlTile, Region } from "react-native-maps";
 import * as Location from "expo-location";
+import { LocationObjectCoords } from "expo-location";
 import { useTheme } from "../ThemeContext";
 
 export default function MapsScreen() {
-  const [region, setRegion] = useState({
+  const [region, setRegion] = useState<Region>({
     latitude: 16.4143,
     longitude: 120.5988,
     latitudeDelta: 0.01,
     longitudeDelta: 0.01,
   });
-  const [userLocation, setUserLocation] = useState(null);
-  const mapRef = useRef<MapView | null>(null);
+
+
+  const [userLocation, setUserLocation] = useState<LocationObjectCoords | null>(null);
+  const mapRef = useRef<MapView>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -61,10 +64,10 @@ export default function MapsScreen() {
   return (
     <View style={s.container}>
       <MapView
-        ref={(r) => (mapRef.current = r)}
+        ref={mapRef}
         style={s.map}
-        provider={null}
-        region={region}
+        provider={undefined}
+        onRegionChangeComplete={setRegion}
       >
         {/* OpenStreetMap tiles*/}
         <UrlTile

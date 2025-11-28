@@ -10,7 +10,7 @@ export default function HomeScreen() {
     <SafeAreaView
       className={`flex-1 ${darkMode ? 'bg-black' : 'bg-[#F9FAFB]'}`} 
     >
-      {/* Header */}
+      
       <View className="px-5 pt-4 pb-2 flex-row items-center justify-between">
         <Text
           className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-green-700'}`} 
@@ -22,13 +22,12 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Map Preview */}
       <View
         className={`mx-5 mt-2 mb-4 h-52 rounded-2xl items-center justify-center ${
           darkMode ? 'bg-gray-800' : 'bg-green-100' 
         }`}
       >
-        <MapPin color={darkMode ? "#9AE6B4" : "#166534"} size={50} /> {/* ✅ Dark Mode Edit */}
+        <MapPin color={darkMode ? "#9AE6B4" : "#166534"} size={50} /> 
         <Text
           className={`mt-2 text-base font-medium ${
             darkMode ? 'text-white' : 'text-green-800' 
@@ -45,7 +44,7 @@ export default function HomeScreen() {
         </Text>
       </View>
 
-      {/* Active Jeepneys */}
+      
       <ScrollView className="px-5">
         <Text
           className={`text-lg font-semibold mb-3 ${
@@ -55,7 +54,7 @@ export default function HomeScreen() {
           Jeeps Nearby
         </Text>
 
-        {/* Jeep Card */}
+        
         <View
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
             darkMode ? 'bg-gray-800' : 'bg-white' 
@@ -77,10 +76,10 @@ export default function HomeScreen() {
               ETA: 3 mins
             </Text>
           </View>
-          <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} /> {/* ✅ Dark Mode Edit */}
+          <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} />
         </View>
 
-        {/* Repeat Jeep Card */}
+      
         <View
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
             darkMode ? 'bg-gray-800' : 'bg-white' 
@@ -102,7 +101,7 @@ export default function HomeScreen() {
               ETA: 5 mins
             </Text>
           </View>
-          <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} /> {/* ✅ Dark Mode Edit */}
+          <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} />
         </View>
 
         <View
@@ -126,7 +125,7 @@ export default function HomeScreen() {
               ETA: 7 mins
             </Text>
           </View>
-          <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} /> {/* ✅ Dark Mode Edit */}
+          <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} /> 
         </View>
       </ScrollView>
     </SafeAreaView>

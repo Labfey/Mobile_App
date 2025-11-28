@@ -86,16 +86,6 @@ function TabLayout() {
         }}
       />
 
-
-      {/* Hidden dynamic route — no tab bar icon */}
-      <Tabs.Screen
-        name="jeep/[id]"
-        options={{
-          title: "Jeep Details",
-          href: null,
-          headerShown: false,
-        }}
-      />
     </Tabs>
   );
 }

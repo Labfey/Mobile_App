@@ -2,15 +2,28 @@ import { View, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams } from "expo-router";
 
-const jeepneys = {
-  "1": { route: "Jeep 1", plate: "ABC-1234", driver: "Mang Tomas",},
-  "2": { route: "Jeep 2", plate: "XYZ-5678", driver: "Mang Tomas",},
-  "3": { route: "Jeep 3", plate: "JKL-9101", driver: "Mang Tomas",},
+
+type JeepneyInfo = {
+  route: string;
+  plate: string;
+  driver: string;
+  capacity?: number; 
+};
+
+
+const jeepneys: Record<string, JeepneyInfo> = {
+  "1": { route: "Jeep 1", plate: "ABC-1234", driver: "Mang Tomas", capacity: 20 },
+  "2": { route: "Jeep 2", plate: "XYZ-5678", driver: "Mang Tomas", capacity: 22 },
+  "3": { route: "Jeep 3", plate: "JKL-9101", driver: "Mang Tomas", capacity: 18 },
 };
 
 export default function JeepProfile() {
   const { id } = useLocalSearchParams();
-  const jeep = jeepneys[id];
+
+
+  const safeId = Array.isArray(id) ? id[0] : id;
+
+  const jeep = safeId ? jeepneys[safeId] : undefined; 
 
   if (!jeep) {
     return (
@@ -28,11 +41,11 @@ export default function JeepProfile() {
         <Text className="text-xl font-semibold">{jeep.route}</Text>
         <Text className="text-gray-700 mt-1">Plate Number: {jeep.plate}</Text>
         <Text className="text-gray-700 mt-1">Driver: {jeep.driver}</Text>
-        <Text className="text-gray-700 mt-1">Capacity: {jeep.capacity} passengers</Text>
+        <Text className="text-gray-700 mt-1">Capacity: {jeep.capacity ?? "N/A"} passengers</Text>
       </View>
 
       <Text className="text-lg text-gray-600">
-        Lorem ipsum dolor sit amet consectetur, adipisicing elit. Eum itaque ullam soluta, consectetur est eos ipsam nobis earum eius dignissimos qui voluptatibus. Nisi laudantium facilis, consequuntur quam cum non voluptas.
+        Lorem ipsum dolor sit amet consectetur, adipisicing elit.
       </Text>
     </SafeAreaView>
   );

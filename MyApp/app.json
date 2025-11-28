@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "JeepRoute needs your location to show you nearby jeepneys." 
+        "NSLocationWhenInUseUsageDescription": "JeepRoute needs your location to show you nearby jeepneys."
       }
     },
     "android": {
@@ -28,7 +28,7 @@
       "package": "com.labfey.MyApp",
       "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION" 
+        "ACCESS_COARSE_LOCATION"
       ]
     },
     "plugins": [
@@ -39,7 +39,6 @@
           "locationAlwaysAndWhenInUsePermission": "Allow MyApp to use your location even when the app is in the background for mapping features."
         }
       ],
-      "react-native-maps",
       [
         "expo-splash-screen",
         {
