@@ -5,6 +5,27 @@ import * as Location from "expo-location";
 import { LocationObjectCoords } from "expo-location";
 import { useTheme } from "../ThemeContext";
 
+const [jeeps, setJeeps] = useState([
+  { id: "1", lat: 16.4150, lng: 120.5985, name: "Jeep 1", plate: "ABC-123" },
+  { id: "2", lat: 16.4140, lng: 120.5995, name: "Jeep 2", plate: "XYZ-456" },
+  { id: "3", lat: 16.4136, lng: 120.5977, name: "Jeep 3", plate: "JKL-789" }
+]);
+
+// simulator: move jeeps slightly every 5s
+useEffect(() => {
+  const t = setInterval(() => {
+    setJeeps((prev) =>
+      prev.map((j, i) => ({
+        ...j,
+        lat: j.lat + (Math.random() - 0.5) * 0.0003,
+        lng: j.lng + (Math.random() - 0.5) * 0.0003,
+      }))
+    );
+  }, 5000);
+  return () => clearInterval(t);
+}, []);
+
+
 export default function MapsScreen() {
   const [region, setRegion] = useState<Region>({
     latitude: 16.4143,
@@ -84,6 +105,21 @@ export default function MapsScreen() {
             pinColor="blue"
           />
         )}
+        {/* Example static jeep markers: */}
+          {jeeps.map((j) => (
+            <Marker
+              key={j.id}
+              coordinate={{ latitude: j.lat, longitude: j.lng }}
+              title={j.name}
+              description={`Plate: ${j.plate}`}
+              pinColor="green"
+              onPress={() => {
+                //router.push(`/jeep/${j.id}`);
+              }}
+            />
+          ))}
+
+        
       </MapView>
     </View>
   );
