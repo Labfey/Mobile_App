@@ -1,16 +1,22 @@
 import { View, Text, TouchableOpacity, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { MapPin, Navigation, BusFront, User } from "lucide-react-native";
+import { MapPin, BusFront, User } from "lucide-react-native";
 import { useTheme } from "../ThemeContext";
+import { useRouter } from "expo-router";
 
 export default function HomeScreen() {
-  const { darkMode } = useTheme(); 
+  const { darkMode } = useTheme();
+  const router = useRouter();
+  const goToMap = () => {
+    router.push("/mapscreen");
+  };
 
   return (
     <SafeAreaView
       className={`flex-1 ${darkMode ? 'bg-black' : 'bg-[#F9FAFB]'}`} 
     >
       
+      {/* Header */}
       <View className="px-5 pt-4 pb-2 flex-row items-center justify-between">
         <Text
           className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-green-700'}`} 
@@ -21,8 +27,10 @@ export default function HomeScreen() {
           <User color="white" size={22} />
         </TouchableOpacity>
       </View>
-
-      <View
+  {/* BUTTON 1 */}
+      <TouchableOpacity
+        onPress={goToMap}
+        activeOpacity={0.7}
         className={`mx-5 mt-2 mb-4 h-52 rounded-2xl items-center justify-center ${
           darkMode ? 'bg-gray-800' : 'bg-green-100' 
         }`}
@@ -40,9 +48,9 @@ export default function HomeScreen() {
             darkMode ? 'text-gray-300' : 'text-gray-500' 
           }`}
         >
-          Your current location
+          Tap to open map
         </Text>
-      </View>
+      </TouchableOpacity>
 
       
       <ScrollView className="px-5">
@@ -54,8 +62,9 @@ export default function HomeScreen() {
           Jeeps Nearby
         </Text>
 
-        
-        <View
+        {/* BUTTON 2 */}
+        <TouchableOpacity
+          onPress={goToMap}
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
             darkMode ? 'bg-gray-800' : 'bg-white' 
           }`}
@@ -66,7 +75,7 @@ export default function HomeScreen() {
                 darkMode ? 'text-green-400' : 'text-green-700'
               }`}
             >
-              Jeep
+              Jeep (Balacbac)
             </Text>
             <Text
               className={`text-xs ${
@@ -77,10 +86,12 @@ export default function HomeScreen() {
             </Text>
           </View>
           <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} />
-        </View>
+        </TouchableOpacity>
 
       
-        <View
+        {/* BUTTON 3 */}
+        <TouchableOpacity
+          onPress={goToMap}
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
             darkMode ? 'bg-gray-800' : 'bg-white' 
           }`}
@@ -91,7 +102,7 @@ export default function HomeScreen() {
                 darkMode ? 'text-green-400' : 'text-green-700' 
               }`}
             >
-              Jeep
+              Jeep (Balacbac)
             </Text>
             <Text
               className={`text-xs ${
@@ -102,9 +113,11 @@ export default function HomeScreen() {
             </Text>
           </View>
           <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} />
-        </View>
+        </TouchableOpacity>
 
-        <View
+        {/* BUTTON 4*/}
+        <TouchableOpacity
+          onPress={goToMap}
           className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${
             darkMode ? 'bg-gray-800' : 'bg-white'
           }`}
@@ -115,7 +128,7 @@ export default function HomeScreen() {
                 darkMode ? 'text-green-400' : 'text-green-700' 
               }`}
             >
-              Jeep
+              Jeep (Balacbac)
             </Text>
             <Text
               className={`text-xs ${
@@ -126,7 +139,8 @@ export default function HomeScreen() {
             </Text>
           </View>
           <BusFront color={darkMode ? "#9AE6B4" : "#15803D"} size={28} /> 
-        </View>
+        </TouchableOpacity>
+
       </ScrollView>
     </SafeAreaView>
   );

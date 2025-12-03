@@ -1,26 +1,80 @@
-import { View, Text, Image, TouchableOpacity, ScrollView } from "react-native";
+import { View, Text, Image, TouchableOpacity, ScrollView, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useTheme } from "../ThemeContext";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import { ComponentProps } from "react";
+import { useRouter } from "expo-router";
+// import { auth, signOut } from "../../services/firebase";
 
 type FontAwesomeName = ComponentProps<typeof FontAwesome>['name'];
 
-interface SettingsRowProps{
+interface SettingsRowProps {
   icon: FontAwesomeName;
   label: string;
   color: string;
   bg: string;
+  onPress: () => void;
 }
 
 export default function Profile() {
   const { darkMode } = useTheme();
+  const router = useRouter();
+  
+  const [userEmail, setUserEmail] = useState("juan@jeeproute.ph");
+  const [userName, setUserName] = useState("Juan Dela Cruz");
+
+  // ❌ REMOVED useEffect (No need to check backend)
+  /*
+  useEffect(() => {
+    if (auth.currentUser) {
+      setUserEmail(auth.currentUser.email || "JeepRoute User");
+    }
+  }, []);
+  */
 
   const bg = darkMode ? "#0f172a" : "#F9FAFB";
   const card = darkMode ? "#1e293b" : "#ffffff";
   const text = darkMode ? "#e2e8f0" : "#1f2937";
   const muted = darkMode ? "#94a3b8" : "#6b7280";
+
+  // --- INTERACTION HANDLERS ---
+
+  const handlePlaceholder = (featureName: string) => {
+    Alert.alert(
+      featureName, 
+      `This would open the ${featureName} screen.`
+    );
+  };
+
+  const handleLogout = () => {
+    Alert.alert(
+      "Log Out",
+      "Are you sure you want to sign out?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Log Out",
+          style: "destructive",
+          onPress: () => {
+             // ✅ SIMULATED LOGOUT (No backend error)
+             //console.log("User logged out locally");
+             //router.replace("/login"); 
+             
+             // ❌ Old Backend Call
+             /*
+             try {
+               await signOut(auth);
+               router.replace("/login");
+             } catch (error: any) {
+               Alert.alert("Error", error.message);
+             }
+             */
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: bg }}>
@@ -63,13 +117,14 @@ export default function Profile() {
           />
 
           <Text style={{ fontSize: 22, fontWeight: "700", color: text }}>
-            Profile Name
+            {userName}
           </Text>
           <Text style={{ fontSize: 14, color: muted, marginBottom: 10 }}>
-            JeepRoute Passenger
+            {userEmail}
           </Text>
 
           <TouchableOpacity
+            onPress={() => handlePlaceholder("Edit Profile")}
             style={{
               marginTop: 10,
               backgroundColor: "#15803d",
@@ -102,18 +157,21 @@ export default function Profile() {
             label="Personal Information"
             color={text}
             bg={card}
+            onPress={() => handlePlaceholder("Personal Info")}
           />
           <SettingsRow
             icon="lock"
             label="Privacy & Security"
             color={text}
             bg={card}
+            onPress={() => handlePlaceholder("Privacy Settings")}
           />
           <SettingsRow
             icon="envelope"
             label="Notifications"
             color={text}
             bg={card}
+            onPress={() => handlePlaceholder("Notification Settings")}
           />
         </View>
 
@@ -135,17 +193,20 @@ export default function Profile() {
             label="Help Center"
             color={text}
             bg={card}
+            onPress={() => handlePlaceholder("Help Center")}
           />
           <SettingsRow
             icon="info-circle"
             label="About JeepRoute"
             color={text}
             bg={card}
+            onPress={() => handlePlaceholder("About Us")}
           />
         </View>
 
         {/* Logout */}
         <TouchableOpacity
+          onPress={handleLogout}
           style={{
             backgroundColor: "#dc2626",
             padding: 15,
@@ -160,9 +221,10 @@ export default function Profile() {
   );
 }
 
-function SettingsRow({ icon, label, color, bg }: SettingsRowProps) {
+function SettingsRow({ icon, label, color, bg, onPress }: SettingsRowProps) {
   return (
     <TouchableOpacity
+      onPress={onPress}
       style={{
         backgroundColor: bg,
         padding: 15,

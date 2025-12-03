@@ -7,19 +7,20 @@ import { useTheme } from "../ThemeContext";
 import { db, ref, onValue, update } from "../../services/firebase"; 
 import { useNavigation } from "@react-navigation/native";
 import { ArrowLeft, Play, Square } from "lucide-react-native";
+import { useRouter } from "expo-router";
 
 const JEEP_ID = "jeep1"; 
 const SPEED = 0.05;
 
-// Path: Balacbac -> Kennon Rd -> Kisad Rd -> Burnham
+// This is the simulation for the route going to Balacbac to Burnham
 const ROUTE_PATH = [
-  { lat: 16.3844, lng: 120.5806 }, // 0. Balacbac Start
-  { lat: 16.3880, lng: 120.5850 }, // 1. Winding Road
-  { lat: 16.3920, lng: 120.5890 }, // 2. Kennon Junction
-  { lat: 16.3990, lng: 120.5930 }, // 3. Camp 7 Area
-  { lat: 16.4050, lng: 120.5960 }, // 4. BGH Rotunda
-  { lat: 16.4100, lng: 120.5940 }, // 5. Kisad Road
-  { lat: 16.4133, lng: 120.5950 }, // 6. Burnham Park End
+  { lat: 16.3844, lng: 120.5806 }, 
+  { lat: 16.3880, lng: 120.5850 }, 
+  { lat: 16.3920, lng: 120.5890 }, 
+  { lat: 16.3990, lng: 120.5930 }, 
+  { lat: 16.4050, lng: 120.5960 }, 
+  { lat: 16.4100, lng: 120.5940 }, 
+  { lat: 16.4133, lng: 120.5950 }, 
 ];
 
 export default function MapsScreen() {
@@ -190,7 +191,7 @@ export default function MapsScreen() {
                 title={j.name || "Jeep"}
                 description={`Plate: ${j.plate}`}
                 pinColor="green"
-                rotation={j.heading} // Rotate the icon if your marker supports it
+                rotation={j.heading} 
               />
             );
         })}

@@ -1,19 +1,46 @@
-import { View, Text, Switch, TouchableOpacity } from "react-native";
-import React, { useState } from "react";
+import { View, Text, Switch, TouchableOpacity, Alert, ScrollView } from "react-native";
+import React from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useTheme } from "../ThemeContext";
+import { useRouter } from "expo-router";
 
-// JeepRoute Green
+
 const JEEP_GREEN = "#2E7D32";
 
 export default function Settings() {
-  // Track dark mode toggle
-  const [darkMode, setDarkMode] = useState(false);
+  const { darkMode, setDarkMode } = useTheme(); 
+  const router = useRouter();
+
+  // --- DEMO HANDLERS ---
+
+  const handlePlaceholder = (title: string) => {
+    Alert.alert(title, `This is a demo. In the real app, this opens the ${title} screen.`);
+  };
+
+  const handleLogout = () => {
+    Alert.alert(
+      "Log Out",
+      "Are you sure you want to sign out?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Log Out", 
+          style: "destructive", 
+          onPress: () => {
+            console.log("User logged out (Demo)");
+            // Navigate back to login (using 'as any' to avoid type errors if file missing)
+            router.replace("/login" as any); 
+          }
+        }
+      ]
+    );
+  };
 
   return (
     <SafeAreaView
       className={`flex-1 ${darkMode ? "bg-black" : "bg-gray-100"}`}
     >
-      <View className="px-6 py-4">
+      <ScrollView className="px-6 py-4">
 
         <Text
           className={`text-3xl font-bold mb-6 ${
@@ -48,7 +75,7 @@ export default function Settings() {
             </Text>
             <Switch
               value={darkMode}
-              onValueChange={setDarkMode}
+              onValueChange={setDarkMode} // ✅ Connects to global context
               trackColor={{ false: "#ccc", true: JEEP_GREEN }}
               thumbColor={darkMode ? "#fff" : "#f4f4f4"}
             />
@@ -69,7 +96,10 @@ export default function Settings() {
             Account
           </Text>
 
-          <TouchableOpacity className="py-3">
+          <TouchableOpacity 
+            className="py-3"
+            onPress={() => handlePlaceholder("Edit Profile")}
+          >
             <Text
               className={`${darkMode ? "text-gray-200" : "text-gray-700"} text-base`}
             >
@@ -77,11 +107,24 @@ export default function Settings() {
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity className="py-3">
+          <TouchableOpacity 
+            className="py-3"
+            onPress={() => handlePlaceholder("Change Password")}
+          >
             <Text
               className={`${darkMode ? "text-gray-200" : "text-gray-700"} text-base`}
             >
               Change Password
+            </Text>
+          </TouchableOpacity>
+          
+           {/* Added Log Out to Account Section */}
+           <TouchableOpacity 
+            className="py-3 mt-2"
+            onPress={handleLogout}
+          >
+            <Text className="text-red-500 font-bold text-base">
+              Log Out
             </Text>
           </TouchableOpacity>
         </View>
@@ -100,7 +143,10 @@ export default function Settings() {
             Support
           </Text>
 
-          <TouchableOpacity className="py-3">
+          <TouchableOpacity 
+            className="py-3"
+            onPress={() => handlePlaceholder("Help Center")}
+          >
             <Text
               className={`${darkMode ? "text-gray-200" : "text-gray-700"} text-base`}
             >
@@ -108,7 +154,10 @@ export default function Settings() {
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity className="py-3">
+          <TouchableOpacity 
+            className="py-3"
+            onPress={() => handlePlaceholder("Report a Problem")}
+          >
             <Text
               className={`${darkMode ? "text-gray-200" : "text-gray-700"} text-base`}
             >
@@ -116,8 +165,12 @@ export default function Settings() {
             </Text>
           </TouchableOpacity>
         </View>
+
+        <Text className={`text-center mb-10 ${darkMode ? "text-gray-500" : "text-gray-400"}`}>
+          JeepRoute Demo v1.0
+        </Text>
         
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
