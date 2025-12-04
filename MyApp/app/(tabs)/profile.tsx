@@ -175,34 +175,7 @@ export default function Profile() {
           />
         </View>
 
-        {/* Help Section */}
-        <View style={{ marginBottom: 30 }}>
-          <Text
-            style={{
-              color: text,
-              fontSize: 16,
-              fontWeight: "700",
-              marginBottom: 10,
-            }}
-          >
-            Support
-          </Text>
 
-          <SettingsRow
-            icon="question-circle"
-            label="Help Center"
-            color={text}
-            bg={card}
-            onPress={() => handlePlaceholder("Help Center")}
-          />
-          <SettingsRow
-            icon="info-circle"
-            label="About JeepRoute"
-            color={text}
-            bg={card}
-            onPress={() => handlePlaceholder("About Us")}
-          />
-        </View>
 
         {/* Logout */}
         <TouchableOpacity
