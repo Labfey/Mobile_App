@@ -1,7 +1,15 @@
-import { initializeApp } from "firebase/app";
-import { getDatabase, ref, onValue, set, update } from "firebase/database";
+import { initializeApp, getApp, getApps } from "firebase/app";
+import { getDatabase, ref, onValue, set, update, get } from "firebase/database";
+import { 
+  getAuth, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut,
+  onAuthStateChanged
+} from "firebase/auth";
 
 const firebaseConfig = {
+  // PASTE YOUR ACTUAL CONFIG KEYS HERE (The ones you copied earlier)
   apiKey: "AIzaSyCnPP-RxUItN2CJIeUpQRm8gogwSMIYRm0",
   authDomain: "jeeproute-eb9a6.firebaseapp.com",
   databaseURL: "https://jeeproute-eb9a6-default-rtdb.asia-southeast1.firebasedatabase.app",
@@ -12,7 +20,13 @@ const firebaseConfig = {
   measurementId: "G-5K3M3W0JSK"
 };
 
-const app = initializeApp(firebaseConfig);
-export const db = getDatabase(app);
+// ✅ FIX: Check if app is already initialized to prevent crashes during reload
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-export { ref, onValue, set, update };
+const db = getDatabase(app);
+const auth = getAuth(app);
+
+export { 
+  db, ref, onValue, set, update, get,
+  auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged
+};
