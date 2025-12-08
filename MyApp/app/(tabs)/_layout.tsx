@@ -1,18 +1,9 @@
 import { Tabs } from "expo-router";
 import React from "react";
-import { ThemeProvider, useTheme } from "../ThemeContext";
+import { useTheme } from "../ThemeContext"; // Adjusted path
 import FontAwesome from "@expo/vector-icons/FontAwesome";
-import { View } from "react-native";
 
-export default function RootLayout() {
-  return (
-    <ThemeProvider>
-      <TabLayout />
-    </ThemeProvider>
-  );
-}
-
-function TabLayout() {
+export default function TabLayout() {
   const { darkMode } = useTheme();
 
   return (
@@ -41,51 +32,37 @@ function TabLayout() {
         name="index"
         options={{
           title: "Home",
-          tabBarIcon: ({ color }) => (
-            <FontAwesome name="home" size={26} color={color} />
-          ),
+          tabBarIcon: ({ color }) => <FontAwesome name="home" size={26} color={color} />,
         }}
       />
-        <Tabs.Screen
+      <Tabs.Screen
         name="mapscreen"
         options={{
           title: "Map",
-          tabBarIcon: ({ color }) => (
-            <FontAwesome name="map" size={26} color={color} />
-          ),
+          tabBarIcon: ({ color }) => <FontAwesome name="map" size={26} color={color} />,
         }}
       />
-
       <Tabs.Screen
         name="jeepInfo"
         options={{
           title: "Jeep Info",
-          tabBarIcon: ({ color }) => (
-            <FontAwesome name="bus" size={26} color={color} />
-          ),
+          tabBarIcon: ({ color }) => <FontAwesome name="bus" size={26} color={color} />,
         }}
       />
-
       <Tabs.Screen
         name="profile"
         options={{
           title: "Profile",
-          tabBarIcon: ({ color }) => (
-            <FontAwesome name="user" size={26} color={color} />
-          ),
+          tabBarIcon: ({ color }) => <FontAwesome name="user" size={26} color={color} />,
         }}
       />
-
       <Tabs.Screen
         name="settings"
         options={{
           title: "Settings",
-          tabBarIcon: ({ color }) => (
-            <FontAwesome name="cog" size={26} color={color} />
-          ),
+          tabBarIcon: ({ color }) => <FontAwesome name="cog" size={26} color={color} />,
         }}
       />
-
     </Tabs>
   );
 }

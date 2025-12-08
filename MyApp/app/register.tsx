@@ -10,7 +10,7 @@ export default function RegisterScreen() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<'passenger' | 'driver'>('passenger');
+  const [role, setRole] = useState<'passenger' | 'driver'>('passenger'); // Default role
   const [loading, setLoading] = useState(false);
 
   const handleRegister = async () => {
@@ -25,7 +25,6 @@ export default function RegisterScreen() {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
 
-      // Save user with their selected ROLE
       await set(ref(db, 'users/' + user.uid), {
         username: name,
         email: email,

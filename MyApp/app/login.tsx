@@ -1,4 +1,4 @@
-import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, StyleSheet, Image } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import React, { useState } from "react";
@@ -46,78 +46,176 @@ export default function LoginScreen() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-white justify-center p-6">
+    <SafeAreaView style={s.container}>
       
       {/* Header Section */}
-      <View className="mb-10">
-        <Text className="text-4xl font-extrabold text-green-800">JeepRoute</Text>
-        <Text className="text-gray-500 text-lg mt-2">Welcome back, passenger!</Text>
+      <View style={s.header}>
+        <Text style={s.title}>JeepRoute</Text>
+        <Text style={s.subtitle}>Welcome back, passenger!</Text>
       </View>
 
-      {/* Email Input */}
-      <View className="mb-4">
-        <Text className="text-gray-600 mb-2 font-medium">Email Address</Text>
-        <View className="flex-row items-center bg-gray-100 rounded-xl px-4 border border-gray-200 focus:border-green-500">
-          <Mail color="gray" size={20} />
-          <TextInput
-            className="flex-1 p-4 text-gray-800"
-            placeholder="juan@example.com"
-            value={email}
-            onChangeText={setEmail}
-            autoCapitalize="none"
-            keyboardType="email-address"
-          />
+      {/* Form Container */}
+      <View style={s.form}>
+        
+        {/* Email Input */}
+        <View style={s.inputGroup}>
+          <Text style={s.label}>Email Address</Text>
+          <View style={s.inputContainer}>
+            <Mail color="#6b7280" size={20} />
+            <TextInput
+              style={s.input}
+              placeholder="juan@example.com"
+              placeholderTextColor="#9ca3af"
+              value={email}
+              onChangeText={setEmail}
+              autoCapitalize="none"
+              keyboardType="email-address"
+            />
+          </View>
         </View>
-      </View>
 
-      {/* Password Input */}
-      <View className="mb-8">
-        <Text className="text-gray-600 mb-2 font-medium">Password</Text>
-        <View className="flex-row items-center bg-gray-100 rounded-xl px-4 border border-gray-200">
-          <Lock color="gray" size={20} />
-          <TextInput
-            className="flex-1 p-4 text-gray-800"
-            placeholder="••••••••"
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-          />
+        {/* Password Input */}
+        <View style={s.inputGroup}>
+          <Text style={s.label}>Password</Text>
+          <View style={s.inputContainer}>
+            <Lock color="#6b7280" size={20} />
+            <TextInput
+              style={s.input}
+              placeholder="••••••••"
+              placeholderTextColor="#9ca3af"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+            />
+          </View>
         </View>
-      </View>
 
-      {/* Login Button */}
-      <TouchableOpacity
-        onPress={handleLogin}
-        className="bg-green-700 p-4 rounded-xl flex-row justify-center items-center shadow-sm"
-        disabled={loading}
-      >
-        {loading ? (
-          <ActivityIndicator color="white" />
-        ) : (
-          <>
-            <Text className="text-white font-bold text-lg mr-2">Log In</Text>
-            <ArrowRight color="white" size={22} />
-          </>
-        )}
-      </TouchableOpacity>
-
-      {/* Register Link */}
-      <View className="flex-row justify-center mt-8">
-        <Text className="text-gray-500">Don&apos;t have an account? </Text>
-        {/* We use 'as any' here to prevent TS error if register.tsx doesn't exist yet */}
-        <TouchableOpacity onPress={() => router.push("/register" as any)}>
-          <Text className="text-green-700 font-bold">Sign Up</Text>
+        {/* Login Button */}
+        <TouchableOpacity
+          onPress={handleLogin}
+          style={s.loginButton}
+          disabled={loading}
+        >
+          {loading ? (
+            <ActivityIndicator color="white" />
+          ) : (
+            <>
+              <Text style={s.loginButtonText}>Log In</Text>
+              <ArrowRight color="white" size={22} />
+            </>
+          )}
         </TouchableOpacity>
-      </View>
-      
-      {/* Guest Mode Link */}
-      <TouchableOpacity 
-        onPress={() => router.replace("/(tabs)")}
-        className="mt-6 items-center"
-      >
-        <Text className="text-gray-400 text-sm">Continue as Guest</Text>
-      </TouchableOpacity>
 
+        {/* Register Link */}
+        <View style={s.footer}>
+          <Text style={s.footerText}>Don&apos;t have an account? </Text>
+          <TouchableOpacity onPress={() => router.push("/register" as any)}>
+            <Text style={s.linkText}>Sign Up</Text>
+          </TouchableOpacity>
+        </View>
+        
+        {/* Guest Mode Link */}
+        <TouchableOpacity 
+          onPress={() => router.replace("/(tabs)")}
+          style={s.guestButton}
+        >
+          <Text style={s.guestText}>Continue as Guest</Text>
+        </TouchableOpacity>
+
+      </View>
     </SafeAreaView>
   );
 }
+
+const s = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  header: {
+    marginBottom: 40,
+  },
+  title: {
+    fontSize: 36,
+    fontWeight: '800',
+    color: '#15803d', // Green-700
+    marginBottom: 8,
+  },
+  subtitle: {
+    fontSize: 18,
+    color: '#6b7280', // Gray-500
+  },
+  form: {
+    width: '100%',
+  },
+  inputGroup: {
+    marginBottom: 20,
+  },
+  label: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151', // Gray-700
+    marginBottom: 8,
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f3f4f6', // Gray-100
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    height: 56,
+    borderWidth: 1,
+    borderColor: '#e5e7eb', // Gray-200
+  },
+  input: {
+    flex: 1,
+    marginLeft: 12,
+    fontSize: 16,
+    color: '#1f2937', // Gray-800
+  },
+  loginButton: {
+    backgroundColor: '#15803d', // Green-700
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 56,
+    borderRadius: 16,
+    marginTop: 10,
+    shadowColor: '#15803d',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  loginButtonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: '700',
+    marginRight: 8,
+  },
+  footer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: 24,
+  },
+  footerText: {
+    color: '#6b7280',
+    fontSize: 15,
+  },
+  linkText: {
+    color: '#15803d',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  guestButton: {
+    marginTop: 24,
+    alignItems: 'center',
+  },
+  guestText: {
+    color: '#9ca3af', // Gray-400
+    fontSize: 14,
+    fontWeight: '500',
+  }
+});
