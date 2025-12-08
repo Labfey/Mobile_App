@@ -1,232 +1,248 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, StyleSheet, ActivityIndicator, Text, TouchableOpacity } from "react-native";
-import MapView, { Marker, UrlTile, Region } from "react-native-maps";
+import { View, StyleSheet, ActivityIndicator, Text, TouchableOpacity, Alert, Image } from "react-native";
+import MapView, { Marker, UrlTile, Polyline, Callout } from "react-native-maps";
 import * as Location from "expo-location";
-import { LocationObjectCoords } from "expo-location";
-import { useTheme } from "../ThemeContext";
-import { db, ref, onValue, update } from "../../services/firebase"; 
+import { auth, db, ref, onValue, update, set, remove, get } from "../../services/firebase"; 
 import { useNavigation } from "@react-navigation/native";
-import { ArrowLeft, Play, Square } from "lucide-react-native";
-import { useRouter } from "expo-router";
-
-const JEEP_ID = "jeep1"; 
-const SPEED = 0.05;
-
-// This is the simulation for the route going to Balacbac to Burnham
-const ROUTE_PATH = [
-  { lat: 16.3844, lng: 120.5806 }, 
-  { lat: 16.3880, lng: 120.5850 }, 
-  { lat: 16.3920, lng: 120.5890 }, 
-  { lat: 16.3990, lng: 120.5930 }, 
-  { lat: 16.4050, lng: 120.5960 }, 
-  { lat: 16.4100, lng: 120.5940 }, 
-  { lat: 16.4133, lng: 120.5950 }, 
-];
+import { ArrowLeft, Users, UserPlus } from "lucide-react-native";
+import { BALACBAC_ROUTE } from "../../constants/routes"; 
 
 export default function MapsScreen() {
   const navigation = useNavigation();
   const mapRef = useRef<MapView>(null);
   const [loading, setLoading] = useState(true);
-  const [userLocation, setUserLocation] = useState<LocationObjectCoords | null>(null);
-
-  const [region, setRegion] = useState<Region>({
-    latitude: 16.4143,
-    longitude: 120.5988,
-    latitudeDelta: 0.03, 
-    longitudeDelta: 0.03,
-  });
-
+  const [userLocation, setUserLocation] = useState<any>(null);
+  
+  // Data State
   const [jeeps, setJeeps] = useState<any[]>([]);
+  const [passengers, setPassengers] = useState<any[]>([]);
+  const [role, setRole] = useState<'passenger' | 'driver' | 'guest'>('guest');
 
-  const [isDemoRunning, setIsDemoRunning] = useState(false);
-  const demoTimer = useRef<any>(null);
-  
-  
-  const currentLeg = useRef(0);
-  const legProgress = useRef(0); 
-  const direction = useRef(1); 
+  // Driver Specific State
+  const [isDriverOnline, setIsDriverOnline] = useState(false);
+  const [isJeepFull, setIsJeepFull] = useState(false);
 
-  
+  // Passenger Specific State
+  const [isHailing, setIsHailing] = useState(false);
+
+  // 1. Initial Setup: Get Role & Current Location
+  useEffect(() => {
+    (async () => {
+      // Get Permissions
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission to access location was denied');
+        return;
+      }
+
+      // Get Location
+      const location = await Location.getCurrentPositionAsync({});
+      setUserLocation(location.coords);
+      setLoading(false);
+
+      // Determine Role from Firebase
+      if (auth.currentUser) {
+        const userRef = ref(db, `users/${auth.currentUser.uid}`);
+        const snapshot = await get(userRef);
+        if (snapshot.exists()) {
+          setRole(snapshot.val().role);
+        }
+      }
+    })();
+  }, []);
+
+  // 2. Listener: Fetch Jeeps (For Everyone)
   useEffect(() => {
     const jeepsRef = ref(db, 'jeeps/');
-
     const unsub = onValue(jeepsRef, (snapshot) => {
       const data = snapshot.val();
-
       if (data) {
-        const loadedJeeps = Object.keys(data).map((key) => ({
-          id: key,
-          ...data[key],
-        }));
-        setJeeps(loadedJeeps);
+        setJeeps(Object.keys(data).map(key => ({ id: key, ...data[key] })));
       } else {
         setJeeps([]);
       }
     });
-
     return () => unsub();
   }, []);
 
-  
-  const toggleDemo = () => {
-    if (isDemoRunning) {
-      if (demoTimer.current) clearInterval(demoTimer.current);
-      setIsDemoRunning(false);
+  // 3. Listener: Fetch Passengers (Only for Drivers)
+  useEffect(() => {
+    if (role !== 'driver') return; // Passengers don't need to see other passengers
+
+    const passRef = ref(db, 'passengers/');
+    const unsub = onValue(passRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setPassengers(Object.keys(data).map(key => ({ id: key, ...data[key] })));
+      } else {
+        setPassengers([]);
+      }
+    });
+    return () => unsub();
+  }, [role]);
+
+  // 4. Logic: Driver Toggles Online/Offline & Capacity
+  const toggleDriverStatus = async () => {
+    if (!auth.currentUser) return;
+    
+    if (isDriverOnline) {
+      // Go Offline
+      await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
+      setIsDriverOnline(false);
     } else {
-      setIsDemoRunning(true);
-      demoTimer.current = setInterval(() => {
-        
-        
-        legProgress.current += SPEED;
-
-        
-        if (legProgress.current >= 1) {
-          legProgress.current = 0; 
-          currentLeg.current += direction.current;
+      // Go Online (Start broadcasting)
+      setIsDriverOnline(true);
+      // Start watching position
+      Location.watchPositionAsync({ distanceInterval: 10 }, (loc) => {
+        if (isDriverOnline) {
+           update(ref(db, `jeeps/${auth.currentUser?.uid}`), {
+             lat: loc.coords.latitude,
+             lng: loc.coords.longitude,
+             isFull: isJeepFull, // Send capacity status
+             plate: "ABC-123", // Ideally fetch this from profile
+             route: "Balacbac"
+           });
         }
-
-        if (currentLeg.current >= ROUTE_PATH.length - 1) {
-           direction.current = -1;
-           currentLeg.current = ROUTE_PATH.length - 2; 
-        } 
-        else if (currentLeg.current < 0) {
-           direction.current = 1;
-           currentLeg.current = 0;
-        }
-        const startPoint = ROUTE_PATH[currentLeg.current];
-        const endPoint = ROUTE_PATH[currentLeg.current + 1];
-
-        
-        const lat = startPoint.lat + (endPoint.lat - startPoint.lat) * legProgress.current;
-        const lng = startPoint.lng + (endPoint.lng - startPoint.lng) * legProgress.current;
-
-        update(ref(db, `jeeps/${JEEP_ID}`), {
-          lat: lat,
-          lng: lng,
-          name: "Demo Jeep",
-          plate: "DEMO-123",
-          heading: Math.atan2(endPoint.lng - startPoint.lng, endPoint.lat - startPoint.lat) * 180 / Math.PI
-        });
-
-      }, 100); 
+      });
     }
   };
 
-  useEffect(() => {
-    return () => {
-      if (demoTimer.current) clearInterval(demoTimer.current);
-    };
-  }, []);
+  const toggleCapacity = async () => {
+    const newStatus = !isJeepFull;
+    setIsJeepFull(newStatus);
+    if (isDriverOnline && auth.currentUser) {
+      await update(ref(db, `jeeps/${auth.currentUser.uid}`), {
+        isFull: newStatus
+      });
+    }
+  };
 
+  // 5. Logic: Passenger Hails Jeep
+  const toggleHail = async () => {
+    if (!auth.currentUser || !userLocation) return;
 
-  useEffect(() => {
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") {
-        setLoading(false);
-        return;
-      }
-      
-      const current = await Location.getCurrentPositionAsync({});
-      setUserLocation(current.coords);
-      setLoading(false);
+    if (isHailing) {
+      // Stop Hailing
+      await remove(ref(db, `passengers/${auth.currentUser.uid}`));
+      setIsHailing(false);
+    } else {
+      // Start Hailing
+      await set(ref(db, `passengers/${auth.currentUser.uid}`), {
+        lat: userLocation.latitude,
+        lng: userLocation.longitude,
+        name: "Waiting Passenger"
+      });
+      setIsHailing(true);
+    }
+  };
 
-      setRegion((r) => ({
-        ...r,
-        latitude: current.coords.latitude,
-        longitude: current.coords.longitude,
-      }));
-
-      await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 5 },
-        (loc) => {
-          setUserLocation(loc.coords);
-        }
-      );
-    })();
-  }, []);
-
-  if (loading) {
-    return (
-      <View style={s.center}>
-        <ActivityIndicator size="large" color="#15803D" />
-        <Text style={{ marginTop: 8 }}>Getting location...</Text>
-      </View>
-    );
-  }
+  if (loading) return <ActivityIndicator size="large" style={s.center} />;
 
   return (
     <View style={s.container}>
       <MapView
         ref={mapRef}
         style={s.map}
-        provider={undefined}
-        initialRegion={region}
-        onRegionChangeComplete={setRegion}
+        initialRegion={{
+          latitude: 16.4143,
+          longitude: 120.5988,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
+        }}
       >
-        {/* OpenStreetMap tiles */}
-        <UrlTile
-          urlTemplate="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-          maximumZ={19}
-          flipY={false}
+        <UrlTile urlTemplate="https://tile.openstreetmap.org/{z}/{x}/{y}.png" maximumZ={19} flipY={false} />
+
+        {/* ✅ ROUTE LINE */}
+        <Polyline 
+          coordinates={BALACBAC_ROUTE}
+          strokeColor="#2E7D32" // JeepRoute Green
+          strokeWidth={4}
         />
 
-        {/* User marker */}
+        {/* User Marker */}
         {userLocation && (
-          <Marker
-            coordinate={{ latitude: userLocation.latitude, longitude: userLocation.longitude }}
-            title="You"
-            pinColor="blue"
-          />
+          <Marker coordinate={{ latitude: userLocation.latitude, longitude: userLocation.longitude }} title="You" pinColor="blue" />
         )}
 
-        {/* Jeep markers */}
+        {/* ✅ JEEP MARKERS (Color coded by Capacity) */}
         {jeeps.map((j) => {
-            if (!j.lat || !j.lng) return null;
-            
-            return (
-              <Marker
-                key={j.id}
-                coordinate={{ latitude: j.lat, longitude: j.lng }}
-                title={j.name || "Jeep"}
-                description={`Plate: ${j.plate}`}
-                pinColor="green"
-                rotation={j.heading} 
-              />
-            );
+           if(!j.lat || !j.lng) return null;
+           return (
+             <Marker
+               key={j.id}
+               coordinate={{ latitude: j.lat, longitude: j.lng }}
+               // Red if Full, Green if Available
+               pinColor={j.isFull ? "red" : "green"} 
+               title={j.isFull ? "Jeep (FULL)" : "Jeep (Available)"}
+             >
+                {/* Optional: Custom Icon for Jeep */}
+                <Callout>
+                  <View style={{padding: 5}}>
+                    <Text style={{fontWeight:'bold'}}>{j.route || "Jeep"}</Text>
+                    <Text>{j.isFull ? "🔴 FULL SEATING" : "🟢 SEATS AVAILABLE"}</Text>
+                  </View>
+                </Callout>
+             </Marker>
+           )
         })}
+
+        {/* ✅ PASSENGER MARKERS (Only visible to Driver) */}
+        {role === 'driver' && passengers.map((p) => (
+           <Marker
+             key={p.id}
+             coordinate={{ latitude: p.lat, longitude: p.lng }}
+             pinColor="yellow"
+             title="Passenger Waiting"
+           />
+        ))}
       </MapView>
 
       {/* Back Button */}
-      <View style={s.backButtonContainer}>
-        <TouchableOpacity 
-          onPress={() => navigation.goBack()}
-          style={s.backButton}
-        >
-          <ArrowLeft color="black" size={24} />
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity onPress={() => navigation.goBack()} style={s.backBtn}>
+        <ArrowLeft color="black" size={24} />
+      </TouchableOpacity>
 
-      {/* ✅ DEMO BUTTON (Bottom Right) */}
-      <View style={s.demoButtonContainer}>
-        <TouchableOpacity 
-          onPress={toggleDemo} 
-          style={[s.roundBtn, isDemoRunning ? {backgroundColor: '#EF4444'} : {backgroundColor: '#22C55E'}]}
-        >
-          {isDemoRunning ? (
-            <Square color="white" size={24} fill="white" /> 
-          ) : (
-            <Play color="white" size={24} fill="white" />
-          )}
-        </TouchableOpacity>
-        <Text style={s.demoText}>{isDemoRunning ? "Stop Demo" : "Start Demo"}</Text>
-      </View>
+      {/* ================= CONTROLS ================= */}
+      
+      {/* DRIVER CONTROLS */}
+      {role === 'driver' && (
+        <View style={s.controlPanel}>
+          <Text style={s.roleText}>Driver Mode</Text>
+          <View style={{flexDirection: 'row', gap: 10}}>
+            <TouchableOpacity 
+              onPress={toggleDriverStatus}
+              style={[s.btn, isDriverOnline ? s.btnRed : s.btnGreen, {flex:1}]}
+            >
+              <Text style={s.btnText}>{isDriverOnline ? "GO OFFLINE" : "GO ONLINE"}</Text>
+            </TouchableOpacity>
 
-      {jeeps.length === 0 && !loading && !isDemoRunning && (
-        <View style={s.emptyStateContainer}>
-          <Text style={s.emptyStateText}>No active jeepneys nearby.</Text>
+            {isDriverOnline && (
+              <TouchableOpacity 
+                onPress={toggleCapacity}
+                style={[s.btn, isJeepFull ? s.btnRed : s.btnGreen, {flex:1}]}
+              >
+                <Users color="white" size={20} />
+                <Text style={s.btnText}>{isJeepFull ? " SET: AVAILABLE" : " SET: FULL"}</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       )}
+
+      {/* PASSENGER CONTROLS */}
+      {role === 'passenger' && (
+        <View style={s.controlPanel}>
+           <Text style={s.roleText}>Passenger Mode</Text>
+           <TouchableOpacity 
+              onPress={toggleHail}
+              style={[s.btn, isHailing ? s.btnRed : s.btnBlue, {flexDirection:'row', justifyContent:'center', gap: 10}]}
+            >
+              <UserPlus color="white" size={20} />
+              <Text style={s.btnText}>{isHailing ? "CANCEL HAIL" : "HAIL JEEP (Broadcast Location)"}</Text>
+            </TouchableOpacity>
+        </View>
+      )}
+
     </View>
   );
 }
@@ -235,61 +251,25 @@ const s = StyleSheet.create({
   container: { flex: 1 },
   map: { flex: 1 },
   center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  backBtn: { position: 'absolute', top: 50, left: 20, backgroundColor: 'white', padding: 10, borderRadius: 25, elevation: 5 },
   
-  backButtonContainer: {
+  controlPanel: {
     position: 'absolute',
-    top: 50,
+    bottom: 30,
     left: 20,
-    zIndex: 10,
-  },
-  backButton: {
+    right: 20,
     backgroundColor: 'white',
-    padding: 10,
-    borderRadius: 25,
-    elevation: 5,
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-  },
-
-  // Demo Button Styles
-  demoButtonContainer: { 
-    position: 'absolute', 
-    bottom: 40, 
-    right: 20, 
-    alignItems: 'center', 
-    zIndex: 10 
-  },
-  demoText: { 
-    color: 'black', 
-    fontWeight: 'bold', 
-    fontSize: 10, 
-    marginTop: 4, 
-    backgroundColor: 'rgba(255,255,255,0.7)', 
-    paddingHorizontal: 4, 
-    borderRadius: 4 
-  },
-  roundBtn: {
-    padding: 12,
-    borderRadius: 30,
-    elevation: 5,
-    shadowColor: "#000",
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-  },
-
-  emptyStateContainer: {
-    position: 'absolute',
-    bottom: 40,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
+    padding: 20,
     borderRadius: 20,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
   },
-  emptyStateText: {
-    color: 'white',
-    fontWeight: 'bold',
-  }
+  roleText: { fontWeight: 'bold', color: 'gray', marginBottom: 10, textAlign: 'center'},
+  btn: { padding: 15, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  btnGreen: { backgroundColor: '#15803D' },
+  btnRed: { backgroundColor: '#DC2626' },
+  btnBlue: { backgroundColor: '#2563EB' },
+  btnText: { color: 'white', fontWeight: 'bold' }
 });
