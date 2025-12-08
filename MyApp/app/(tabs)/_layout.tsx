@@ -1,10 +1,24 @@
 import { Tabs } from "expo-router";
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useTheme } from "../ThemeContext";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
+import { auth, db, ref, get } from "../../services/firebase";
 
 export default function TabLayout() {
   const { darkMode } = useTheme();
+  const [role, setRole] = useState<'passenger' | 'driver' | 'guest'>('guest');
+
+  useEffect(() => {
+    const fetchRole = async () => {
+      if (auth.currentUser) {
+        const snapshot = await get(ref(db, `users/${auth.currentUser.uid}`));
+        if (snapshot.exists()) {
+          setRole(snapshot.val().role);
+        }
+      }
+    };
+    fetchRole();
+  }, []);
 
   return (
     <Tabs
@@ -42,13 +56,17 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <FontAwesome name="map" size={26} color={color} />,
         }}
       />
+      
+      {/* --- HIDDEN FOR DRIVERS --- */}
       <Tabs.Screen
         name="jeepInfo"
         options={{
           title: "Jeep Info",
+          href: role === 'driver' ? null : "/(tabs)/jeepInfo", 
           tabBarIcon: ({ color }) => <FontAwesome name="bus" size={26} color={color} />,
         }}
       />
+
       <Tabs.Screen
         name="profile"
         options={{

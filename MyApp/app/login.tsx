@@ -1,9 +1,9 @@
-import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, StyleSheet, Image } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import React, { useState } from "react";
 import { ArrowRight, Lock, Mail } from "lucide-react-native";
-import { auth, signInWithEmailAndPassword } from "../services/firebase";
+import { auth, signInWithEmailAndPassword, db, ref, get, signOut } from "../services/firebase"; // Added extra imports
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -11,6 +11,7 @@ export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loginRole, setLoginRole] = useState<'passenger' | 'driver'>('passenger'); // Toggle State
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -18,28 +19,37 @@ export default function LoginScreen() {
       return;
     }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      Alert.alert("Invalid Email", "Please enter a valid email address.");
-      return;
-    }
-
     setLoading(true);
 
     try {
-      await signInWithEmailAndPassword(auth, email, password);
-      router.replace("/(tabs)");
+      // 1. Authenticate with Firebase Auth
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+
+      // 2. CHECK ROLE IN DATABASE
+      const userRef = ref(db, `users/${user.uid}`);
+      const snapshot = await get(userRef);
+
+      if (snapshot.exists()) {
+        const userData = snapshot.val();
+        const actualRole = userData.role || 'passenger';
+
+        // 3. SECURITY CHECK: Does selected role match actual role?
+        if (loginRole === 'driver' && actualRole !== 'driver') {
+            await signOut(auth); // Kick them out
+            Alert.alert("Access Denied", "This account is not registered as a Driver.");
+            setLoading(false);
+            return;
+        }
+
+        // Success!
+        router.replace("/(tabs)");
+      } else {
+        Alert.alert("Error", "User data not found.");
+      }
       
     } catch (error: any) {
-      console.error(error);
-      let msg = "Invalid email or password.";
-      
-      if (error.code === 'auth/invalid-email') msg = "That email address looks invalid.";
-      if (error.code === 'auth/user-not-found') msg = "No account found with this email.";
-      if (error.code === 'auth/wrong-password') msg = "Incorrect password.";
-      if (error.code === 'auth/too-many-requests') msg = "Too many failed attempts. Try again later.";
-      
-      Alert.alert("Login Failed", msg);
+      Alert.alert("Login Failed", "Invalid email or password.");
     } finally {
       setLoading(false);
     }
@@ -48,15 +58,29 @@ export default function LoginScreen() {
   return (
     <SafeAreaView style={s.container}>
       
-      {/* Header Section */}
       <View style={s.header}>
         <Text style={s.title}>JeepRoute</Text>
-        <Text style={s.subtitle}>Welcome back, passenger!</Text>
+        <Text style={s.subtitle}>Log in to continue</Text>
       </View>
 
-      {/* Form Container */}
-      <View style={s.form}>
+      {/* --- ROLE SELECTOR (Added Here) --- */}
+      <View style={s.roleContainer}>
+        <TouchableOpacity 
+          onPress={() => setLoginRole('passenger')}
+          style={[s.roleBtn, loginRole === 'passenger' && s.roleBtnActive]}
+        >
+          <Text style={[s.roleText, loginRole === 'passenger' && s.roleTextActive]}>Passenger</Text>
+        </TouchableOpacity>
         
+        <TouchableOpacity 
+          onPress={() => setLoginRole('driver')}
+          style={[s.roleBtn, loginRole === 'driver' && s.roleBtnActive]}
+        >
+          <Text style={[s.roleText, loginRole === 'driver' && s.roleTextActive]}>Driver</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={s.form}>
         {/* Email Input */}
         <View style={s.inputGroup}>
           <Text style={s.label}>Email Address</Text>
@@ -64,8 +88,7 @@ export default function LoginScreen() {
             <Mail color="#6b7280" size={20} />
             <TextInput
               style={s.input}
-              placeholder="juan@example.com"
-              placeholderTextColor="#9ca3af"
+              placeholder={loginRole === 'driver' ? "driver@jeeproute.ph" : "juan@example.com"}
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
@@ -82,7 +105,6 @@ export default function LoginScreen() {
             <TextInput
               style={s.input}
               placeholder="••••••••"
-              placeholderTextColor="#9ca3af"
               value={password}
               onChangeText={setPassword}
               secureTextEntry
@@ -90,23 +112,15 @@ export default function LoginScreen() {
           </View>
         </View>
 
-        {/* Login Button */}
-        <TouchableOpacity
-          onPress={handleLogin}
-          style={s.loginButton}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="white" />
-          ) : (
+        <TouchableOpacity onPress={handleLogin} style={s.loginButton} disabled={loading}>
+          {loading ? <ActivityIndicator color="white" /> : (
             <>
-              <Text style={s.loginButtonText}>Log In</Text>
+              <Text style={s.loginButtonText}>Log In as {loginRole === 'driver' ? 'Driver' : 'Passenger'}</Text>
               <ArrowRight color="white" size={22} />
             </>
           )}
         </TouchableOpacity>
 
-        {/* Register Link */}
         <View style={s.footer}>
           <Text style={s.footerText}>Don&apos;t have an account? </Text>
           <TouchableOpacity onPress={() => router.push("/register" as any)}>
@@ -114,11 +128,7 @@ export default function LoginScreen() {
           </TouchableOpacity>
         </View>
         
-        {/* Guest Mode Link */}
-        <TouchableOpacity 
-          onPress={() => router.replace("/(tabs)")}
-          style={s.guestButton}
-        >
+        <TouchableOpacity onPress={() => router.replace("/(tabs)")} style={s.guestButton}>
           <Text style={s.guestText}>Continue as Guest</Text>
         </TouchableOpacity>
 
@@ -128,94 +138,28 @@ export default function LoginScreen() {
 }
 
 const s = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  header: {
-    marginBottom: 40,
-  },
-  title: {
-    fontSize: 36,
-    fontWeight: '800',
-    color: '#15803d', // Green-700
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 18,
-    color: '#6b7280', // Gray-500
-  },
-  form: {
-    width: '100%',
-  },
-  inputGroup: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#374151', // Gray-700
-    marginBottom: 8,
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f3f4f6', // Gray-100
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    height: 56,
-    borderWidth: 1,
-    borderColor: '#e5e7eb', // Gray-200
-  },
-  input: {
-    flex: 1,
-    marginLeft: 12,
-    fontSize: 16,
-    color: '#1f2937', // Gray-800
-  },
-  loginButton: {
-    backgroundColor: '#15803d', // Green-700
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 56,
-    borderRadius: 16,
-    marginTop: 10,
-    shadowColor: '#15803d',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  loginButtonText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: '700',
-    marginRight: 8,
-  },
-  footer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginTop: 24,
-  },
-  footerText: {
-    color: '#6b7280',
-    fontSize: 15,
-  },
-  linkText: {
-    color: '#15803d',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  guestButton: {
-    marginTop: 24,
-    alignItems: 'center',
-  },
-  guestText: {
-    color: '#9ca3af', // Gray-400
-    fontSize: 14,
-    fontWeight: '500',
-  }
+  container: { flex: 1, backgroundColor: '#ffffff', justifyContent: 'center', padding: 24 },
+  header: { marginBottom: 30 },
+  title: { fontSize: 36, fontWeight: '800', color: '#15803d', marginBottom: 8 },
+  subtitle: { fontSize: 18, color: '#6b7280' },
+  
+  // New Role Styles
+  roleContainer: { flexDirection: 'row', backgroundColor: '#f3f4f6', borderRadius: 12, padding: 4, marginBottom: 25 },
+  roleBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 10 },
+  roleBtnActive: { backgroundColor: '#15803d' },
+  roleText: { fontWeight: '600', color: '#6b7280' },
+  roleTextActive: { color: 'white' },
+
+  form: { width: '100%' },
+  inputGroup: { marginBottom: 20 },
+  label: { fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 8 },
+  inputContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f3f4f6', borderRadius: 12, paddingHorizontal: 16, height: 56, borderWidth: 1, borderColor: '#e5e7eb' },
+  input: { flex: 1, marginLeft: 12, fontSize: 16, color: '#1f2937' },
+  loginButton: { backgroundColor: '#15803d', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 56, borderRadius: 16, marginTop: 10, shadowColor: '#15803d', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4 },
+  loginButtonText: { color: 'white', fontSize: 18, fontWeight: '700', marginRight: 8 },
+  footer: { flexDirection: 'row', justifyContent: 'center', marginTop: 24 },
+  footerText: { color: '#6b7280', fontSize: 15 },
+  linkText: { color: '#15803d', fontWeight: '700', fontSize: 15 },
+  guestButton: { marginTop: 24, alignItems: 'center' },
+  guestText: { color: '#9ca3af', fontSize: 14, fontWeight: '500' }
 });

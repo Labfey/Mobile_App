@@ -10,7 +10,6 @@ export default function RegisterScreen() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<'passenger' | 'driver'>('passenger'); // Default role
   const [loading, setLoading] = useState(false);
 
   const handleRegister = async () => {
@@ -25,14 +24,15 @@ export default function RegisterScreen() {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
 
+      // FORCE ROLE TO 'PASSENGER'
       await set(ref(db, 'users/' + user.uid), {
         username: name,
         email: email,
-        role: role, 
+        role: 'passenger', // <--- Hardcoded Security
         createdAt: Date.now()
       });
 
-      Alert.alert("Success", `Welcome, ${role === 'driver' ? 'Driver' : 'Passenger'}!`, [
+      Alert.alert("Success", "Account created! Welcome aboard.", [
         { text: "OK", onPress: () => router.replace("/(tabs)") }
       ]);
 
@@ -46,23 +46,9 @@ export default function RegisterScreen() {
   return (
     <SafeAreaView className="flex-1 bg-white justify-center p-6">
       <Text className="text-3xl font-bold text-green-800 mb-2">Create Account</Text>
-      <Text className="text-gray-500 mb-8">Join JeepRoute today</Text>
+      <Text className="text-gray-500 mb-8">Sign up to ride with JeepRoute</Text>
 
-      {/* ROLE SELECTOR */}
-      <View className="flex-row mb-6 bg-gray-100 p-1 rounded-xl">
-        <TouchableOpacity 
-          onPress={() => setRole('passenger')}
-          className={`flex-1 p-3 rounded-lg items-center ${role === 'passenger' ? 'bg-green-700' : 'bg-transparent'}`}
-        >
-          <Text className={`font-bold ${role === 'passenger' ? 'text-white' : 'text-gray-500'}`}>Passenger</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          onPress={() => setRole('driver')}
-          className={`flex-1 p-3 rounded-lg items-center ${role === 'driver' ? 'bg-green-700' : 'bg-transparent'}`}
-        >
-          <Text className={`font-bold ${role === 'driver' ? 'text-white' : 'text-gray-500'}`}>Driver</Text>
-        </TouchableOpacity>
-      </View>
+      {/* NO ROLE SELECTOR HERE ANYMORE */}
 
       <Text className="text-gray-500 mb-2">Full Name</Text>
       <TextInput

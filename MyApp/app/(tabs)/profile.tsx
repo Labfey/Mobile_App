@@ -1,11 +1,12 @@
-import { View, Text, Image, TouchableOpacity, ScrollView, Alert, Modal, TextInput, Switch } from "react-native";
+import { View, Text, Image, TouchableOpacity, ScrollView, Alert, Modal, TextInput, Switch, ActivityIndicator } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react"; // Added useEffect
 import { useTheme } from "../ThemeContext";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import { ComponentProps } from "react";
 import { useRouter } from "expo-router";
 import { X } from "lucide-react-native";
+import { auth, db, ref, get, update, signOut } from "../../services/firebase"; 
 
 type FontAwesomeName = ComponentProps<typeof FontAwesome>['name'];
 
@@ -22,16 +23,17 @@ export default function Profile() {
   const router = useRouter();
   
   // --- USER DATA STATE ---
-  const [userEmail, setUserEmail] = useState("juan@jeeproute.ph");
-  const [userName, setUserName] = useState("Juan Dela Cruz");
+  const [userEmail, setUserEmail] = useState("Loading...");
+  const [userName, setUserName] = useState("Loading...");
+  const [loading, setLoading] = useState(true);
 
   // --- MODAL VISIBILITY ---
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [privacyModalVisible, setPrivacyModalVisible] = useState(false);
 
   // --- EDIT PROFILE FORM STATE ---
-  const [tempName, setTempName] = useState(userName);
-  const [tempEmail, setTempEmail] = useState(userEmail);
+  const [tempName, setTempName] = useState("");
+  const [tempEmail, setTempEmail] = useState("");
 
   // --- PRIVACY SETTINGS STATE ---
   const [biometricEnabled, setBiometricEnabled] = useState(false);
@@ -44,6 +46,29 @@ export default function Profile() {
   const muted = darkMode ? "#94a3b8" : "#6b7280";
   const inputBg = darkMode ? "#334155" : "#f3f4f6";
 
+  // --- 1. FETCH USER DATA ON LOAD ---
+  useEffect(() => {
+    const fetchUserData = async () => {
+      if (auth.currentUser) {
+        try {
+          const userRef = ref(db, `users/${auth.currentUser.uid}`);
+          const snapshot = await get(userRef);
+
+          if (snapshot.exists()) {
+            const data = snapshot.val();
+            setUserName(data.username || "No Name");
+            setUserEmail(data.email || auth.currentUser.email);
+          }
+        } catch (error) {
+          console.log("Error fetching profile:", error);
+        }
+      }
+      setLoading(false);
+    };
+
+    fetchUserData();
+  }, []);
+
   // --- HANDLERS ---
 
   const handleEditProfileOpen = () => {
@@ -52,15 +77,30 @@ export default function Profile() {
     setEditModalVisible(true);
   };
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     if (!tempName || !tempEmail) {
       Alert.alert("Error", "Name and Email cannot be empty.");
       return;
     }
-    setUserName(tempName);
-    setUserEmail(tempEmail);
-    setEditModalVisible(false);
-    Alert.alert("Success", "Profile updated successfully!");
+
+    try {
+      // Update Local State
+      setUserName(tempName);
+      setUserEmail(tempEmail);
+      
+      // Update Firebase Database
+      if (auth.currentUser) {
+        await update(ref(db, `users/${auth.currentUser.uid}`), {
+          username: tempName,
+          email: tempEmail
+        });
+      }
+
+      setEditModalVisible(false);
+      Alert.alert("Success", "Profile updated successfully!");
+    } catch (error) {
+      Alert.alert("Error", "Failed to update profile in database.");
+    }
   };
 
   const handleChangePassword = () => {
@@ -77,9 +117,8 @@ export default function Profile() {
       {
         text: "Log Out",
         style: "destructive",
-        onPress: () => {
-             // ✅ This effectively logs the user out by redirecting to Login
-             // We use 'as any' to bypass TypeScript checks if the route file isn't strictly typed yet
+        onPress: async () => {
+             await signOut(auth); // Sign out from Firebase
              router.replace("/login" as any); 
         },
       },
@@ -102,8 +141,14 @@ export default function Profile() {
             style={{ width: 100, height: 100, borderRadius: 50, marginBottom: 15 }}
           />
 
-          <Text style={{ fontSize: 22, fontWeight: "700", color: text }}>{userName}</Text>
-          <Text style={{ fontSize: 14, color: muted, marginBottom: 10 }}>{userEmail}</Text>
+          {loading ? (
+            <ActivityIndicator size="small" color="#15803d" />
+          ) : (
+            <>
+              <Text style={{ fontSize: 22, fontWeight: "700", color: text }}>{userName}</Text>
+              <Text style={{ fontSize: 14, color: muted, marginBottom: 10 }}>{userEmail}</Text>
+            </>
+          )}
 
           <TouchableOpacity
             onPress={handleEditProfileOpen}
@@ -118,10 +163,7 @@ export default function Profile() {
           <Text style={{ color: text, fontSize: 16, fontWeight: "700", marginBottom: 10 }}>Account</Text>
 
           <SettingsRow icon="user" label="Personal Information" color={text} bg={card} onPress={handleEditProfileOpen} />
-          
-          {/* ✅ Connect Privacy Modal Here */}
           <SettingsRow icon="lock" label="Privacy & Security" color={text} bg={card} onPress={() => setPrivacyModalVisible(true)} />
-          
           <SettingsRow icon="envelope" label="Notifications" color={text} bg={card} onPress={() => handlePlaceholder("Notification Settings")} />
         </View>
 
