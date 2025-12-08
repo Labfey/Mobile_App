@@ -1,6 +1,7 @@
 import { Stack } from "expo-router";
 import React from "react";
 import { ThemeProvider } from "./ThemeContext";
+import "./globals.css";
 
 export default function RootLayout() {
   return (
