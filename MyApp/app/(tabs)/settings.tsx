@@ -53,7 +53,7 @@ export default function Settings() {
           </TouchableOpacity>
         </View>
 
-        <Text className={`text-center mb-10 ${subTextClass}`}>JeepRoute Demo v1.2</Text>
+        <Text className={`text-center mb-10 ${subTextClass}`}>JeepRoute</Text>
       </ScrollView>
     </SafeAreaView>
   );

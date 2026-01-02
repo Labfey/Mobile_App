@@ -24,6 +24,7 @@ const db = getDatabase(app);
 const auth = getAuth(app);
 
 export { 
+  app,
   db, ref, onValue, set, update, get, remove,
   auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged
 };
