@@ -5,10 +5,8 @@ import * as Location from "expo-location";
 import { auth, db, ref, onValue, update, remove, get } from "../../services/firebase"; 
 import { useNavigation } from "@react-navigation/native";
 import { ArrowLeft, Navigation, Star, Car, User, MapPin } from "lucide-react-native"; 
-// Assuming FALLBACK_ROUTE is defined in constants/routes, using BURNHAM_COORD for default map center
-import { BALACBAC_COORD, BURNHAM_COORD, SHAGEM_COORD } from "../../constants/routes"; 
+import { BALACBAC_COORD, SHAGEM_COORD } from "../../constants/routes"; 
 
-// Define a basic structure for Coordinates
 interface Coords {
   latitude: number;
   longitude: number;
@@ -34,18 +32,33 @@ export default function MapsScreen() {
   const [isJeepFull, setIsJeepFull] = useState(false);
   const [isRouteModalVisible, setIsRouteModalVisible] = useState(false);
   const [currentRoute, setCurrentRoute] = useState<'Balacbac' | 'Town' | null>(null);
-  
-  // *** NEW PASSENGER STATE ***
-  const [selectedJeep, setSelectedJeep] = useState<any>(null); // The jeep the passenger clicked
+  const [hasArrived, setHasArrived] = useState(false); // NEW: Track arrival alert state
+
+  // PASSENGER STATE
+  const [selectedJeep, setSelectedJeep] = useState<any>(null); 
   const [passengerRouteCoordinates, setPassengerRouteCoordinates] = useState<Coords[]>([]);
   const [passengerRouteDistance, setPassengerRouteDistance] = useState<string>("");
-  // ***************************
   
   const locationSubscription = useRef<Location.LocationSubscription | null>(null);
   const headingSubscription = useRef<Location.LocationSubscription | null>(null);
 
+  // --- HELPER: DISTANCE CALCULATION (Haversine) ---
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+    const R = 6371e3; // Earth radius in meters
+    const φ1 = (lat1 * Math.PI) / 180;
+    const φ2 = (lat2 * Math.PI) / 180;
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180;
 
-  // --- 1. ROUTE FETCHING LOGIC (Made reusable) ---
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c; // returns distance in meters
+  };
+
+  // --- 1. ROUTE FETCHING LOGIC ---
   const determineDestination = (routeLabel: string) => {
       if (routeLabel.includes('Balacbac ➡️ Town')) return SHAGEM_COORD;
       if (routeLabel.includes('Town ➡️ Balacbac')) return BALACBAC_COORD;
@@ -85,19 +98,14 @@ export default function MapsScreen() {
         setCoords([]);
         setDist("Route Failed");
       }
-  }, []); // Empty dependency array means this function is stable
+  }, []);
 
   // --- 2. PASSENGER INTERACTION ---
   const handleJeepSelect = (jeep: any) => {
-    // 1. Set selected jeep to show the info card
     setSelectedJeep(jeep); 
-
-    // 2. Fetch the route for this specific jeep
     if (jeep && jeep.lat && jeep.lng && jeep.route) {
         const jeepLocation: Coords = { latitude: jeep.lat, longitude: jeep.lng };
-        // Use the reusable fetchRoute to update passenger-specific state
         fetchRoute(jeepLocation, jeep.route, setPassengerRouteCoordinates, setPassengerRouteDistance);
-        
     } else {
         setPassengerRouteCoordinates([]);
         setPassengerRouteDistance("");
@@ -105,19 +113,16 @@ export default function MapsScreen() {
   };
 
   const handleMapPress = () => {
-      // Clear selection and route when map is clicked away from a jeep
       setSelectedJeep(null);
       setPassengerRouteCoordinates([]);
       setPassengerRouteDistance("");
   }
-  // ---------------------------------
   
   // --- 3. DRIVER LOGIC ---
   const getDriverRouteLabel = (routeType: 'Balacbac' | 'Town') => {
     return routeType === 'Town' ? 'Balacbac ➡️ Town (Shagem St)' : 'Town (Shagem St) ➡️ Balacbac';
   }
   
-  // AUTO-ROUTE RECALCULATION EFFECT (Driver only)
   useEffect(() => {
       if (role !== 'driver' || !isDriverOnline || !userLocation || !currentRoute) {
           if (!isDriverOnline) {
@@ -126,39 +131,52 @@ export default function MapsScreen() {
           }
           return;
       }
-      
       const routeLabel = getDriverRouteLabel(currentRoute);
-      // Use the reusable fetchRoute to update driver-specific state
       fetchRoute(userLocation, routeLabel, setRouteCoordinates, setRouteDistance);
+  }, [userLocation, currentRoute, isDriverOnline, role, fetchRoute]);
 
-  }, [userLocation, currentRoute, isDriverOnline, role, fetchRoute]); // Added fetchRoute dependency (safe due to useCallback)
-
-  // DRIVER START TRIP HANDLER
   const handleSelectRoute = (route: 'Balacbac' | 'Town') => {
     setIsRouteModalVisible(false);
+    setHasArrived(false); // Reset arrival flag for new trip
     setCurrentRoute(route);
     startDriverTracking(route); 
   };
   
-  // DRIVER TRACKING LOGIC (Updated to use reusable function logic)
   const startDriverTracking = async (route: 'Balacbac' | 'Town') => {
     if (!auth.currentUser) return;
-
     setIsDriverOnline(true);
     
     const userSnap = await get(ref(db, `users/${auth.currentUser.uid}`));
     const userData = userSnap.val();
     const dName = userData?.name || "Driver"; 
     const dPlate = userData?.plateNumber || "ABC-123";
-
     const routeLabel = getDriverRouteLabel(route);
+    const dest = route === 'Balacbac' ? BALACBAC_COORD : SHAGEM_COORD;
 
     locationSubscription.current = await Location.watchPositionAsync(
       { distanceInterval: 10, accuracy: Location.Accuracy.High },
       (loc) => {
         const newCoords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
-        
         setUserLocation(newCoords); 
+
+        // Arrival Notification Logic
+        if (!hasArrived) {
+            const distanceToTarget = calculateDistance(
+                newCoords.latitude, 
+                newCoords.longitude, 
+                dest.latitude, 
+                dest.longitude
+            );
+
+            if (distanceToTarget < 50) { // 50 meters threshold
+                setHasArrived(true);
+                Alert.alert(
+                    "Terminal Reached!", 
+                    "You are within 50 meters of your destination. Switch to offline if your shift is ending.",
+                    [{ text: "OK" }]
+                );
+            }
+        }
         
         update(ref(db, `jeeps/${auth.currentUser?.uid}`), {
           lat: newCoords.latitude,
@@ -173,40 +191,34 @@ export default function MapsScreen() {
     );
   }
 
-  // DRIVER TOGGLE STATUS (Kept as is)
   const toggleDriverStatus = async () => {
       if (!auth.currentUser) return;
-
       if (isDriverOnline) {
         if (locationSubscription.current) locationSubscription.current.remove();
         await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
         setIsDriverOnline(false);
         setCurrentRoute(null);
         setRouteCoordinates([]);
+        setHasArrived(false);
       } else {
         setIsRouteModalVisible(true);
       }
     };
-  // -------------------------
 
-  // --- 4. DATA LISTENERS & INITIAL SETUP (Kept as is) ---
+  // --- 4. DATA LISTENERS & INITIAL SETUP ---
   useEffect(() => {
-    // ... Initial Setup Logic
     (async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permission denied', 'We need location access to show jeeps.');
         return;
       }
-
       const location = await Location.getCurrentPositionAsync({});
       setUserLocation(location.coords);
       setLoading(false);
-
       headingSubscription.current = await Location.watchHeadingAsync((obj) => {
         setUserHeading(obj.magHeading);
       });
-
       if (auth.currentUser) {
         const userRef = ref(db, `users/${auth.currentUser.uid}`);
         const snapshot = await get(userRef);
@@ -215,7 +227,6 @@ export default function MapsScreen() {
         }
       }
     })();
-
     return () => {
       if (locationSubscription.current) locationSubscription.current.remove();
       if (headingSubscription.current) headingSubscription.current.remove();
@@ -247,24 +258,17 @@ export default function MapsScreen() {
     });
     return () => unsub();
   }, [role]);
-  // -----------------------------------------------------
 
   if (loading) return <ActivityIndicator size="large" style={s.center} color="#15803d" />;
 
-  // --- 5. RENDER LOGIC (Combined Route Display) ---
-  const destinationCoord = currentRoute === 'Town' ? SHAGEM_COORD : (currentRoute === 'Balacbac' ? BALACBAC_COORD : BURNHAM_COORD);
-  
-  // Determine which route polyline to display
-  const activeRouteCoords = isDriverOnline 
-    ? routeCoordinates // Driver's own active route
-    : passengerRouteCoordinates; // Passenger's selected jeep's route
-    
-  const activeRouteColor = isDriverOnline ? "#0ea5e9" : "#059669"; // Blue for driver, Green for passenger selected
+  // --- 5. RENDER LOGIC ---
+  const destinationCoord = currentRoute === 'Balacbac' ? BALACBAC_COORD : SHAGEM_COORD;
+  const activeRouteCoords = isDriverOnline ? routeCoordinates : passengerRouteCoordinates;
+  const activeRouteColor = isDriverOnline ? "#0ea5e9" : "#059669"; 
   const activeRouteWidth = isDriverOnline ? 6 : 5;
 
-  // Determine which distance badge content to show
   let displayRouteDistance = routeDistance;
-  let displayRouteName = getDriverRouteLabel(currentRoute as 'Balacbac' | 'Town') || 'Route Map';
+  let displayRouteName = currentRoute ? getDriverRouteLabel(currentRoute) : 'Route Map';
 
   if (!isDriverOnline) {
       if (selectedJeep) {
@@ -278,7 +282,6 @@ export default function MapsScreen() {
 
   return (
     <View style={s.container}>
-      {/* Route Selection Modal (Driver Only) - Kept as is */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -290,18 +293,12 @@ export default function MapsScreen() {
             <Text style={s.modalTitle}>Select Your Destination</Text>
             <Text style={s.modalSubtitle}>Where are you going from your current location?</Text>
 
-            <TouchableOpacity
-              style={[s.routeOptionBtn, s.btnGreen]}
-              onPress={() => handleSelectRoute('Town')}
-            >
+            <TouchableOpacity style={[s.routeOptionBtn, s.btnGreen]} onPress={() => handleSelectRoute('Town')}>
               <MapPin color="white" size={20} />
               <Text style={s.routeOptionText}>Go to Town (Shagem St)</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[s.routeOptionBtn, s.btnBlue]}
-              onPress={() => handleSelectRoute('Balacbac')}
-            >
+            <TouchableOpacity style={[s.routeOptionBtn, s.btnBlue]} onPress={() => handleSelectRoute('Balacbac')}>
               <MapPin color="white" size={20} />
               <Text style={s.routeOptionText}>Go to Balacbac Terminal</Text>
             </TouchableOpacity>
@@ -309,7 +306,6 @@ export default function MapsScreen() {
         </Pressable>
       </Modal>
 
-      {/* Main Map View */}
       <MapView
         ref={mapRef}
         style={s.map}
@@ -319,11 +315,10 @@ export default function MapsScreen() {
           latitudeDelta: 0.05,
           longitudeDelta: 0.05,
         }}
-        onPress={handleMapPress} // Clears passenger selection
+        onPress={handleMapPress}
       >
         <UrlTile urlTemplate="https://tile.openstreetmap.org/{z}/{x}/{y}.png" maximumZ={19} flipY={false} />
 
-        {/* --- DYNAMIC ROUTE LINE (Driver OR Passenger Selected) --- */}
         {activeRouteCoords.length > 0 && (
           <Polyline 
             coordinates={activeRouteCoords} 
@@ -335,8 +330,6 @@ export default function MapsScreen() {
           />
         )}
 
-        {/* --- DYNAMIC DESTINATION MARKER --- */}
-        {/* Only show the destination marker if the driver is online and has a route */}
         {isDriverOnline && currentRoute && (
           <Marker coordinate={destinationCoord} title={currentRoute || "Destination"} anchor={{x: 0.5, y: 1}}>
             <View style={s.pinContainer}>
@@ -348,7 +341,6 @@ export default function MapsScreen() {
           </Marker>
         )}
         
-        {/* --- JEEPNEY MARKERS --- */}
         {jeeps.map((j) => (
            j.lat && j.lng ? (
              <Marker
@@ -358,7 +350,6 @@ export default function MapsScreen() {
                title={j.route}
                flat={true} 
                zIndex={1}
-               // *** MODIFIED: Use the new handler for passenger route selection ***
                onPress={(e) => { e.stopPropagation(); handleJeepSelect(j); }}
              >
                 <View style={s.haloCircle}>
@@ -370,7 +361,6 @@ export default function MapsScreen() {
            ) : null
         ))}
         
-        {/* --- USER MARKER (ROTATING ARROW) --- */}
         {userLocation && (
           <Marker 
             coordinate={userLocation} 
@@ -388,12 +378,10 @@ export default function MapsScreen() {
         )}
       </MapView>
       
-      {/* INFO BADGE */}
       <View style={s.distanceBadge}>
          <Text style={s.distanceText}>{displayRouteName} • {displayRouteDistance || "Select Route"}</Text>
       </View>
 
-      {/* DRIVER INFO CARD (JEEP PROFILE) */}
       {selectedJeep && (
         <View style={s.infoCard}>
           <View style={s.cardHeader}>
@@ -426,7 +414,6 @@ export default function MapsScreen() {
             </Text>
           </View>
           
-          {/* NEW: Route info box for the selected jeep */}
           {passengerRouteDistance && (
             <View style={s.routeInfoBox}>
                 <Text style={s.routeInfoText}>Route Length: {passengerRouteDistance}</Text>
@@ -436,27 +423,21 @@ export default function MapsScreen() {
         </View>
       )}
       
-      {/* DRIVER CONTROLS - Kept as is */}
       {role === 'driver' && (
         <View style={s.controlPanel}>
           <Text style={s.roleText}>Driver Controls</Text>
-          
           {isDriverOnline && (
              <TouchableOpacity 
                 onPress={() => {
                    const newStatus = !isJeepFull;
                    setIsJeepFull(newStatus);
                    if (auth.currentUser) {
-                      update(ref(db, `jeeps/${auth.currentUser.uid}`), {
-                         isFull: newStatus,
-                      });
+                      update(ref(db, `jeeps/${auth.currentUser.uid}`), { isFull: newStatus });
                    }
                 }}
                 style={[s.statusToggleBtn, isJeepFull ? s.btnYellow : s.btnGreen]}
              >
-                <Text style={s.statusToggleText}>
-                   {isJeepFull ? "✅ SET OPEN" : "⚠️ SET FULL"}
-                </Text>
+                <Text style={s.statusToggleText}>{isJeepFull ? "✅ SET OPEN" : "⚠️ SET FULL"}</Text>
              </TouchableOpacity>
           )}
 
@@ -481,52 +462,16 @@ const s = StyleSheet.create({
   container: { flex: 1 },
   map: { flex: 1 },
   center: { flex: 1, justifyContent: "center", alignItems: "center" },
-  
-  // --- MODAL STYLES (Keep as is) ---
-  centeredView: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  modalView: {
-    margin: 20,
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 35,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 5,
-    width: '80%',
-  },
+  centeredView: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  modalView: { margin: 20, backgroundColor: 'white', borderRadius: 20, padding: 35, alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4, elevation: 5, width: '80%' },
   modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 10, color: '#1f2937' },
   modalSubtitle: { fontSize: 14, color: '#6b7280', marginBottom: 20, textAlign: 'center' },
-  routeOptionBtn: {
-    width: '100%',
-    padding: 15,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    marginTop: 10,
-  },
+  routeOptionBtn: { width: '100%', padding: 15, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', marginTop: 10 },
   routeOptionText: { color: 'white', fontWeight: 'bold', marginLeft: 10, fontSize: 16 },
-
-  // --- MARKER STYLES (Keep as is) ---
-  haloCircle: {
-    width: 60, height: 60, borderRadius: 30,
-    backgroundColor: 'rgba(59, 130, 246, 0.15)',
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.3)',
-  },
+  haloCircle: { width: 60, height: 60, borderRadius: 30, backgroundColor: 'rgba(59, 130, 246, 0.15)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.3)' },
   pinContainer: { alignItems: 'center', width: 40, height: 40 },
   pinHead: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'white', zIndex: 2 },
   pinStick: { width: 2, height: 12, backgroundColor: '#ef4444', marginTop: -2, zIndex: 1 },
-
-  // --- UI/CONTROL STYLES (Keep as is) ---
   backBtn: { position: 'absolute', top: 50, left: 20, backgroundColor: 'white', padding: 10, borderRadius: 12, elevation: 5 },
   distanceBadge: { position: 'absolute', top: 50, right: 20, backgroundColor: 'white', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 20, elevation: 5 },
   distanceText: { fontSize: 12, fontWeight: '700', color: '#334155' },
@@ -536,41 +481,11 @@ const s = StyleSheet.create({
   btnGreen: { backgroundColor: '#15803D' },
   btnRed: { backgroundColor: '#DC2626' },
   btnBlue: { backgroundColor: '#2563EB' },
-  statusToggleBtn: { 
-     padding: 15, 
-     borderRadius: 12, 
-     alignItems: 'center', 
-     justifyContent: 'center', 
-  },
-  statusToggleText: { 
-     color: 'white', 
-     fontWeight: 'bold', 
-     fontSize: 16 
-  },
-  btnYellow: { 
-     backgroundColor: '#F59E0B' 
-  },
-  btnText: { 
-     color: 'white', 
-     fontWeight: 'bold', 
-     marginLeft: 8 
-  },
-
-  // --- INFO CARD STYLES (Keep as is) ---
-  infoCard: {
-    position: 'absolute',
-    bottom: 30, 
-    left: 20, right: 20,
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 20,
-    elevation: 20, 
-    shadowColor: '#000', 
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    zIndex: 9999,
-  },
+  statusToggleBtn: { padding: 15, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  statusToggleText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  btnYellow: { backgroundColor: '#F59E0B' },
+  btnText: { color: 'white', fontWeight: 'bold', marginLeft: 8 },
+  infoCard: { position: 'absolute', bottom: 30, left: 20, right: 20, backgroundColor: 'white', borderRadius: 20, padding: 20, elevation: 20, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 10, zIndex: 9999 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   cardTitle: { fontSize: 18, fontWeight: 'bold', color: '#1F2937' },
   closeText: { fontSize: 18, color: '#9CA3AF', fontWeight: 'bold', padding: 5 },
@@ -583,22 +498,7 @@ const s = StyleSheet.create({
   plateText: { fontSize: 14, fontWeight: 'bold', color: '#374151', fontFamily: 'monospace' },
   statusBox: { padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   statusText: { fontWeight: '800', fontSize: 14, letterSpacing: 0.5 },
-  
-  // *** NEW STYLE FOR PASSENGER ROUTE INFO ***
-  routeInfoBox: {
-    marginTop: 15,
-    padding: 10,
-    backgroundColor: '#F3F4F6',
-    borderRadius: 8,
-  },
-  routeInfoText: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#1F2937',
-    marginBottom: 2,
-  },
-  routeInfoSubtitle: {
-    fontSize: 12,
-    color: '#6B7280',
-  }
+  routeInfoBox: { marginTop: 15, padding: 10, backgroundColor: '#F3F4F6', borderRadius: 8 },
+  routeInfoText: { fontSize: 14, fontWeight: 'bold', color: '#1F2937', marginBottom: 2 },
+  routeInfoSubtitle: { fontSize: 12, color: '#6B7280' }
 });
