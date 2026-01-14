@@ -1,10 +1,12 @@
 // constants/routes.ts
 
 // Balacbac Terminal
-export const BALACBAC_COORD = { latitude: 16.3860, longitude: 120.5890 }; // Balacbac Feeder Rd
+export const BALACBAC_COORD = { 
+  latitude: 16.378736032785287, 
+  longitude: 120.58602216348046 
+}; 
 
-
-// NEW: Shagem Street (Town Terminal) - This resolves the import error
+// Shagem Street (Town Terminal)
 export const SHAGEM_COORD = { latitude: 16.4132, longitude: 120.5975 }; 
 
 export const FALLBACK_ROUTE = [
