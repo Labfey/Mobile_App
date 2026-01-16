@@ -49,17 +49,6 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <FontAwesome name="home" size={26} color={color} />,
         }}
       />
-      
-      {/* --- DASHBOARD: Only visible to DRIVERS --- */}
-      <Tabs.Screen
-        name="DriverDashboard"
-        options={{
-          title: "Dashboard",
-          href: role === 'driver' ? ("/(tabs)/DriverDashboard" as any) : undefined, 
-          tabBarIcon: ({ color }) => <FontAwesome name="bar-chart" size={24} color={color} />,
-        }}
-      />
-
       <Tabs.Screen
         name="mapscreen"
         options={{
@@ -67,17 +56,13 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <FontAwesome name="map" size={26} color={color} />,
         }}
       />
-      
-      {/* --- JEEP INFO: Hidden for Drivers --- */}
       <Tabs.Screen
         name="jeepInfo"
         options={{
           title: "Jeep Info",
-          href: role === 'driver' ? null : "/(tabs)/jeepInfo", 
           tabBarIcon: ({ color }) => <FontAwesome name="bus" size={26} color={color} />,
         }}
       />
-
       <Tabs.Screen
         name="profile"
         options={{
