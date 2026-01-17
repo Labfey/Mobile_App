@@ -28,7 +28,7 @@ export default function RegisterScreen() {
       await set(ref(db, 'users/' + user.uid), {
         username: name,
         email: email,
-        role: 'passenger', // <--- Hardcoded Security
+        role: 'passenger', 
         createdAt: Date.now()
       });
 
@@ -48,7 +48,7 @@ export default function RegisterScreen() {
       <Text className="text-3xl font-bold text-green-800 mb-2">Create Account</Text>
       <Text className="text-gray-500 mb-8">Sign up to ride with JeepRoute</Text>
 
-      {/* NO ROLE SELECTOR HERE ANYMORE */}
+      
 
       <Text className="text-gray-500 mb-2">Full Name</Text>
       <TextInput
