@@ -63,7 +63,7 @@ export default function HomeScreen() {
           <View className="px-5 mb-6">
             <View className={`p-5 rounded-3xl shadow-sm ${darkMode ? 'bg-gray-800' : 'bg-green-700'}`}>
               <Text className="text-white text-lg font-bold">Welcome, Driver {userName}!</Text>
-              <Text className="text-white/80 text-sm mb-4">Ready to start your Balacbac route?</Text>
+              <Text className="text-white/80 text-sm mb-4">Ready to start driving?</Text>
               <TouchableOpacity 
                 onPress={goToMap}
                 className="bg-white py-3 rounded-xl items-center flex-row justify-center"
@@ -96,22 +96,6 @@ export default function HomeScreen() {
           <MapPin color={darkMode ? "#4ade80" : "#166534"} size={50} /> 
           <Text className={`mt-2 text-base font-bold ${darkMode ? 'text-white' : 'text-green-800'}`}>Open Live Map</Text>
         </TouchableOpacity>
-
-        <View className="px-5 mt-8">
-          <Text className={`text-lg font-semibold mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>Available Routes</Text>
-          <TouchableOpacity onPress={goToMap} className={`rounded-2xl p-4 mb-3 shadow-sm flex-row justify-between items-center ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
-            <View className="flex-row items-center">
-              <View className="bg-green-100 p-2 rounded-lg mr-3">
-                <BusFront color="#15803d" size={20} />
-              </View>
-              <View>
-                <Text className={`text-base font-bold ${darkMode ? 'text-green-400' : 'text-green-700'}`}>Balacbac Route</Text>
-                <Text className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Active tracking enabled</Text>
-              </View>
-            </View>
-            <Text className="text-green-600 font-bold">VIEW</Text>
-          </TouchableOpacity>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
