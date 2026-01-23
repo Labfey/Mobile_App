@@ -40,12 +40,12 @@ export default function LoginScreen() {
         <SafeAreaView style={s.container}>
             <View style={s.header}>
                 <Text style={s.title}>JeepRoute</Text>
-                <Text style={s.subtitle}>Baguio City Transit System</Text>
+                <Text style={s.subtitle}>Balacbac Transit System</Text>
             </View>
 
             {/* --- BIG COMMUTER CHOICE --- */}
             <View style={s.commuterSection}>
-                <Text style={s.sectionLabel}>ARE YOU A COMMUTER?</Text>
+                <Text style={s.sectionLabel}>COMMUTERS</Text>
                 <TouchableOpacity 
                     onPress={() => router.replace("/(tabs)")} 
                     style={s.guestButton}
@@ -66,7 +66,7 @@ export default function LoginScreen() {
 
             <View style={s.dividerContainer}>
                 <View style={s.divider} />
-                <Text style={s.dividerText}>STAFF ONLY</Text>
+                <Text style={s.dividerText}>DRIVERS</Text>
                 <View style={s.divider} />
             </View>
 

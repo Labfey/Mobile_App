@@ -10,14 +10,12 @@ export default function TabLayout() {
 
   useEffect(() => {
     const fetchRole = async () => {
-      // If a user is logged in, check their role in the database
       if (auth.currentUser) {
         const snapshot = await get(ref(db, `users/${auth.currentUser.uid}`));
         if (snapshot.exists()) {
           setRole(snapshot.val().role);
         }
       } else {
-        // If not logged in, they are a guest (commuter)
         setRole('guest');
       }
     };
@@ -72,7 +70,6 @@ export default function TabLayout() {
         options={{
           title: "Profile",
           tabBarIcon: ({ color }) => <FontAwesome name="user" size={26} color={color} />,
-          // Hide profile if guest to encourage login for drivers only
           href: auth.currentUser ? "/profile" : null, 
         }}
       />

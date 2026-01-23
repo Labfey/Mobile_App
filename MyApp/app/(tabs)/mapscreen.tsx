@@ -1,11 +1,37 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, StyleSheet, Text, TouchableOpacity, Modal, Alert, Animated } from "react-native";
+import { View, StyleSheet, Text, TouchableOpacity, Modal, Alert, Animated, Platform } from "react-native";
 import { WebView } from "react-native-webview";
 import * as Location from "expo-location";
+import * as TaskManager from 'expo-task-manager';
 import { Navigation as NavIcon, MapPin, Circle, XCircle } from "lucide-react-native"; 
 import { ref, onValue, update, get } from "firebase/database";
 import { auth, db } from "../../services/firebase"; 
 import { FARE_ZONES } from "../../constants/routes"; 
+
+const LOCATION_TASK_NAME = 'background-location-task';
+
+TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }: any) => {
+  if (error) {
+    console.error('Background task error:', error);
+    return;
+  }
+
+  if (data) {
+    const { locations } = data;
+    const { latitude, longitude } = locations[0].coords;
+
+    if (auth.currentUser) {
+      try {
+        await update(ref(db, `jeeps/${auth.currentUser.uid}`), {
+          latitude,
+          longitude,
+        });
+      } catch (err) {
+        console.log('Background Firebase update error:', err);
+      }
+    }
+  }
+});
 
 interface ExtendedZone {
   originalIndex: number;
@@ -20,7 +46,6 @@ export default function MapScreen() {
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState<'driver' | 'passenger' | 'guest'>('guest');
   
-  // Driver State
   const [isFull, setIsFull] = useState(false);
   const [routeModalVisible, setRouteModalVisible] = useState(false);
   const [currentDest, setCurrentDest] = useState<'Town' | 'Balacbac' | null>(null);
@@ -28,8 +53,8 @@ export default function MapScreen() {
   const activeZonesRef = useRef<ExtendedZone[]>([]);
   const locationSub = useRef<any>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const [webViewLoaded, setWebViewLoaded] = useState(false);
 
-  // Pulse animation for active trip indicator
   useEffect(() => {
     if (currentDest) {
       Animated.loop(
@@ -49,7 +74,6 @@ export default function MapScreen() {
     }
   }, [currentDest]);
 
-  // 1. INITIAL ROLE CHECK
   useEffect(() => {
     const fetchRole = async () => {
       if (auth.currentUser) {
@@ -63,27 +87,42 @@ export default function MapScreen() {
     fetchRole();
   }, []);
 
-  // 2. GENERATE ROUTE (With Color Reversing Logic & Connected Segments)
-  const startTrip = async (destination: 'Town' | 'Balacbac') => {
-    webViewRef.current?.postMessage(JSON.stringify({ type: "CLEAR_ZONES" }));
-    
-    // Copy base zones with their original indices
-    const baseZones: ExtendedZone[] = FARE_ZONES.map((z, i) => ({ ...z, originalIndex: i }));
-    
-    // LOGIC: If going to Town, REVERSE the entire zone order (Zone 4 -> Zone 1)
-    const zonesToProcess = destination === 'Town' ? [...baseZones].reverse() : [...baseZones];
+  const postMessageToWebView = (message: any) => {
+    if (webViewRef.current && webViewLoaded) {
+      const messageStr = JSON.stringify(message);
+      // console.log('Sending to WebView:', message.type);
+      webViewRef.current.postMessage(messageStr);
+    }
+  };
 
-    // COLOR REVERSAL: If going to Town, flip the colors array
-    const originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444']; // Green -> Yellow -> Orange -> Red
-    const reversedColors = [...originalColors].reverse(); // Red -> Orange -> Yellow -> Green
+  const startTrip = async (destination: 'Town' | 'Balacbac') => {
+    postMessageToWebView({ type: "CLEAR_ZONES" });
+    
+    if (role === 'driver') {
+      const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+      if (bgStatus === 'granted') {
+        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+          accuracy: Location.Accuracy.High,
+          timeInterval: 5000,
+          distanceInterval: 5,
+          foregroundService: {
+            notificationTitle: "JeepRoute Tracking Active",
+            notificationBody: `Currently heading to ${destination}`,
+            notificationColor: "#15803d",
+          },
+        });
+      }
+    }
+    
+    const baseZones: ExtendedZone[] = FARE_ZONES.map((z, i) => ({ ...z, originalIndex: i }));
+    const zonesToProcess = destination === 'Town' ? [...baseZones].reverse() : [...baseZones];
+    const originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
+    const reversedColors = [...originalColors].reverse();
     const colorsToUse = destination === 'Town' ? reversedColors : originalColors;
 
     const zoneData = await Promise.all(zonesToProcess.map(async (zone, idx) => {
-      // COORDINATE SWAP: If going to Town, swap Start/End coordinates of each segment
       const start = destination === 'Town' ? zone.pts[1] : zone.pts[0];
       const end = destination === 'Town' ? zone.pts[0] : zone.pts[1];
-      
-      // Get the color from our reversed/normal array
       const zoneColor = colorsToUse[idx];
       
       try {
@@ -98,37 +137,31 @@ export default function MapScreen() {
         }
         return { coords: [], color: zoneColor };
       } catch (e) { 
+        console.log('Route fetch error:', e);
         return { coords: [], color: zoneColor }; 
       }
     }));
 
-    // CONNECT SEGMENTS: Add the last point of each segment as the first point of the next
     for (let i = 0; i < zoneData.length - 1; i++) {
       if (zoneData[i].coords.length > 0 && zoneData[i + 1].coords.length > 0) {
         const lastPoint = zoneData[i].coords[zoneData[i].coords.length - 1];
         const nextFirstPoint = zoneData[i + 1].coords[0];
-        
-        // If there's a gap, connect them
         const distance = Math.sqrt(
           Math.pow(lastPoint[0] - nextFirstPoint[0], 2) + 
           Math.pow(lastPoint[1] - nextFirstPoint[1], 2)
         );
-        
-        // If gap is more than 0.0001 degrees (~11 meters), add connecting point
         if (distance > 0.0001) {
           zoneData[i + 1].coords.unshift(lastPoint);
         }
       }
     }
 
-    // Send lines to Map
-    webViewRef.current?.postMessage(JSON.stringify({ 
+    postMessageToWebView({ 
       type: "DRAW_ZONES", 
       zones: zoneData,
       destination: destination 
-    }));
+    });
     
-    // Update State & Firebase
     setCurrentDest(destination);
     setRouteModalVisible(false);
     
@@ -140,16 +173,20 @@ export default function MapScreen() {
     }
   };
 
-  // 3. END TRIP LOGIC
   const endTrip = () => {
     Alert.alert("End Trip", "Are you sure you want to end the current trip?", [
       { text: "Cancel", style: "cancel" },
       { 
         text: "End Trip", 
         style: "destructive", 
-        onPress: () => {
+        onPress: async () => {
           setCurrentDest(null);
-          webViewRef.current?.postMessage(JSON.stringify({ type: "CLEAR_ZONES" }));
+          postMessageToWebView({ type: "CLEAR_ZONES" });
+          
+          const isTracking = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+          if (isTracking) {
+            await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+          }
           
           if (auth.currentUser) {
             update(ref(db, `jeeps/${auth.currentUser.uid}`), { 
@@ -171,31 +208,32 @@ export default function MapScreen() {
     }
   };
 
-  // 4. LOCATION LISTENER (Dynamic Navigator)
   useEffect(() => {
     (async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      if (status !== 'granted') {
+        console.log('Location permission denied');
+        return;
+      }
 
       locationSub.current = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.High, distanceInterval: 5 }, 
         (pos) => {
           const { latitude, longitude } = pos.coords;
 
-          // Send location to Map with navigator mode enabled
-          webViewRef.current?.postMessage(JSON.stringify({ 
+          postMessageToWebView({ 
             type: "SET_LOCATION", 
             lat: latitude, 
             lng: longitude,
             isDriver: role === 'driver',
-            hasActiveRoute: currentDest !== null // Enable navigator mode
-          }));
+            hasActiveRoute: currentDest !== null
+          });
 
           if (role === 'driver' && auth.currentUser) {
              update(ref(db, `jeeps/${auth.currentUser.uid}`), { 
                latitude, 
                longitude
-             });
+             }).catch(err => console.log('Firebase update error:', err));
           }
         }
       );
@@ -204,12 +242,21 @@ export default function MapScreen() {
       const unsubscribe = onValue(jeepsRef, (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.val();
-          const jeepsArray = Object.keys(data).map(key => ({
-            id: key,
-            ...data[key]
-          }));
-          webViewRef.current?.postMessage(JSON.stringify({ type: "SET_JEEPS", jeeps: jeepsArray }));
+          // Filter: Only include jeeps that have a valid destination (active trip)
+          // This ensures that when a driver stops a trip (destination becomes null),
+          // they are removed from the list sent to the map.
+          const jeepsArray = Object.keys(data)
+            .map(key => ({ id: key, ...data[key] }))
+            .filter(j => j.destination && j.latitude && j.longitude); 
+            
+          console.log('Firebase: Active Jeeps:', jeepsArray.length);
+          postMessageToWebView({ type: "SET_JEEPS", jeeps: jeepsArray });
+        } else {
+            // If no data exists, send empty array so map clears everyone
+            postMessageToWebView({ type: "SET_JEEPS", jeeps: [] });
         }
+      }, (error) => {
+        console.log('Firebase listener error:', error);
       });
 
       return () => unsubscribe();
@@ -218,9 +265,8 @@ export default function MapScreen() {
     return () => {
       if (locationSub.current) locationSub.current.remove();
     };
-  }, [role, currentDest]);
+  }, [role, currentDest, webViewLoaded]);
 
-  // 5. MAP HTML (Dynamic Navigator Logic)
   const mapHtml = `
     <!DOCTYPE html>
     <html>
@@ -231,82 +277,98 @@ export default function MapScreen() {
       <style>
         body { margin: 0; padding: 0; }
         #map { height: 100vh; width: 100vw; background: #f8f9fa; }
-        
         .user-dot { 
-          width: 20px; 
-          height: 20px; 
+          width: 20px; height: 20px; 
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          border: 4px solid white; 
-          border-radius: 50%; 
+          border: 4px solid white; border-radius: 50%; 
           box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5), 0 0 0 8px rgba(102, 126, 234, 0.15);
-          position: relative;
           animation: pulse 2s infinite;
         }
-        
         @keyframes pulse {
           0%, 100% { box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5), 0 0 0 8px rgba(102, 126, 234, 0.15); }
           50% { box-shadow: 0 4px 12px rgba(102, 126, 234, 0.7), 0 0 0 12px rgba(102, 126, 234, 0.25); }
         }
-        
         .jeep-marker { 
-          width: 36px;
-          height: 36px;
+          width: 36px; height: 36px; 
           background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-          border: 3px solid white; 
-          border-radius: 50%; 
-          text-align: center; 
-          line-height: 30px; 
-          font-size: 18px; 
+          border: 3px solid white; border-radius: 50%; 
+          text-align: center; line-height: 30px; font-size: 18px; 
           box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
           transition: all 0.3s ease;
+          cursor: pointer;
         }
-        
-        .jeep-marker:hover {
-          transform: scale(1.1);
-          box-shadow: 0 6px 16px rgba(16, 185, 129, 0.6);
-        }
-        
+        .jeep-marker:hover { transform: scale(1.1); }
         .jeep-full { 
           background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
           box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4) !important;
         }
-        
-        .jeep-full:hover {
-          box-shadow: 0 6px 16px rgba(239, 68, 68, 0.6) !important;
+        /* Custom Popup Style */
+        .leaflet-popup-content-wrapper {
+            border-radius: 12px;
+            padding: 0;
+            overflow: hidden;
+        }
+        .leaflet-popup-content {
+            margin: 0;
+            width: 160px !important;
+        }
+        .popup-header {
+            background: #10b981;
+            color: white;
+            padding: 8px;
+            font-weight: bold;
+            text-align: center;
+        }
+        .popup-body {
+            padding: 10px;
+            text-align: center;
+        }
+        .fare-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-bottom: 4px;
+            color: #374151;
         }
       </style>
     </head>
     <body>
       <div id="map"></div>
       <script>
+        console.log('=== MAP SCRIPT STARTING ===');
+        
         var map = L.map('map', { 
-          zoomControl: false,
+          zoomControl: false, 
           attributionControl: false 
         }).setView([16.4023, 120.5960], 14);
         
         L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-          attribution: '© OpenStreetMap contributors'
+          maxZoom: 19
         }).addTo(map);
 
         var userMarker = null;
         var jeepMarkers = {};
-        var routeSegments = []; // Array of polylines
-        var passengerViewRoutes = []; // For passenger viewing jeep routes
+        var routeSegments = [];
+        var passengerViewRoutes = [];
         var isDriverMode = false;
         var hasActiveRoute = false;
-        var jeepsData = {}; // Store jeep data including destinations
+        var jeepsData = {};
 
-        // --- ENHANCED NAVIGATOR LOGIC ---
+        console.log('Map initialized');
+
+        setTimeout(function() {
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
+          }
+        }, 500);
+
         function updateNavigatorRoute(lat, lng) {
           if (routeSegments.length === 0 || !hasActiveRoute) return;
 
-          // Get the current active segment (the first one in the list)
           var currentPoly = routeSegments[0];
           var points = currentPoly.getLatLngs();
-          
           if (!points || points.length === 0) return;
 
-          // Find the closest point on this segment to the driver
           var closestDist = Infinity;
           var closestIdx = -1;
 
@@ -318,45 +380,33 @@ export default function MapScreen() {
             }
           }
 
-          // Check if we're near the end of this segment
-          // If within 40 meters of the last point, remove this segment
           var lastPointDist = map.distance([lat, lng], points[points.length - 1]);
           if (lastPointDist < 40) {
             map.removeLayer(currentPoly);
-            routeSegments.shift(); // Remove completed segment
-            
-            // Auto-pan to next segment if exists
+            routeSegments.shift();
             if (routeSegments.length > 0) {
               var nextPoints = routeSegments[0].getLatLngs();
-              if (nextPoints.length > 0) {
-                map.panTo(nextPoints[0]);
-              }
+              if (nextPoints.length > 0) map.panTo(nextPoints[0]);
             }
             return;
           }
 
-          // DYNAMIC LINE SHORTENING:
-          // Keep points from closest index onwards, and snap the start to driver location
           if (closestIdx !== -1 && closestIdx < points.length - 1) {
             var remainingPoints = points.slice(closestIdx);
-            remainingPoints.unshift([lat, lng]); // Connect line to driver's current position
+            remainingPoints.unshift([lat, lng]);
             currentPoly.setLatLngs(remainingPoints);
           }
         }
 
-        // --- PASSENGER: SHOW JEEP ROUTE ON CLICK ---
-        async function showJeepRoute(jeepId) {
-          // Clear any existing passenger routes
-          passengerViewRoutes.forEach(r => map.removeLayer(r));
+        function showJeepRoute(jeepId) {
+          console.log('Showing route for jeep:', jeepId);
+          // Clear previous passenger routes
+          passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
           passengerViewRoutes = [];
           
           var jeep = jeepsData[jeepId];
-          if (!jeep || !jeep.destination) {
-            alert('This jeep has no active route');
-            return;
-          }
+          if (!jeep || !jeep.destination) return;
           
-          // Define zone points (same as React Native)
           var POINTS = {
             TOWN: [16.414019, 120.593455],
             SHELL: [16.393590, 120.579564],
@@ -376,13 +426,10 @@ export default function MapScreen() {
           
           var destination = jeep.destination;
           var zonesToProcess = destination === 'Town' ? FARE_ZONES.slice().reverse() : FARE_ZONES;
-          
-          // Color logic
           var originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
           var reversedColors = originalColors.slice().reverse();
           var colorsToUse = destination === 'Town' ? reversedColors : originalColors;
           
-          // Fetch routes
           var fetchPromises = zonesToProcess.map(function(zone, idx) {
             var start = destination === 'Town' ? zone.pts[1] : zone.pts[0];
             var end = destination === 'Town' ? zone.pts[0] : zone.pts[1];
@@ -399,30 +446,24 @@ export default function MapScreen() {
                 }
                 return { coords: [], color: color };
               })
-              .catch(function() {
-                return { coords: [], color: color };
-              });
+              .catch(function(err) { return { coords: [], color: color }; });
           });
           
           Promise.all(fetchPromises).then(function(zoneData) {
-            // Connect segments
             for (var i = 0; i < zoneData.length - 1; i++) {
               if (zoneData[i].coords.length > 0 && zoneData[i + 1].coords.length > 0) {
                 var lastPoint = zoneData[i].coords[zoneData[i].coords.length - 1];
                 var nextFirstPoint = zoneData[i + 1].coords[0];
-                
                 var distance = Math.sqrt(
                   Math.pow(lastPoint[0] - nextFirstPoint[0], 2) + 
                   Math.pow(lastPoint[1] - nextFirstPoint[1], 2)
                 );
-                
                 if (distance > 0.0001) {
                   zoneData[i + 1].coords.unshift(lastPoint);
                 }
               }
             }
             
-            // Draw routes
             zoneData.forEach(function(z) {
               if (z.coords && z.coords.length > 0) {
                 var poly = L.polyline(z.coords, { 
@@ -436,17 +477,18 @@ export default function MapScreen() {
               }
             });
             
-            // Zoom to route
-            if (passengerViewRoutes.length > 0) {
-              var group = L.featureGroup(passengerViewRoutes);
-              map.fitBounds(group.getBounds(), { padding: [50, 50] });
-            }
+            // Do NOT fit bounds here automatically, it might annoy the user if they are panning.
+            // But if you want to focus on the route, you can uncomment this:
+            // if (passengerViewRoutes.length > 0) {
+            //   var group = L.featureGroup(passengerViewRoutes);
+            //   map.fitBounds(group.getBounds(), { padding: [50, 50] });
+            // }
           });
         }
 
-        window.addEventListener("message", (event) => {
+        function handleMessage(event) {
           try {
-            const m = JSON.parse(event.data);
+            var m = JSON.parse(event.data);
             
             if (m.type === "SET_LOCATION") {
               isDriverMode = m.isDriver;
@@ -458,26 +500,21 @@ export default function MapScreen() {
                 map.panTo([m.lat, m.lng]);
               } else {
                 userMarker.setLatLng([m.lat, m.lng]);
-                
-                // Smooth follow for driver
                 if (isDriverMode && hasActiveRoute) {
                   map.panTo([m.lat, m.lng], { animate: true, duration: 0.5 });
                 }
               }
 
-              // Update navigator route if driver has active trip
               if (isDriverMode && hasActiveRoute) {
                 updateNavigatorRoute(m.lat, m.lng);
               }
             }
             
             if (m.type === "DRAW_ZONES") {
-              // Clear old routes
-              routeSegments.forEach(s => map.removeLayer(s));
+              routeSegments.forEach(function(s) { map.removeLayer(s); });
               routeSegments = [];
               
-              // Draw new route segments with reversed colors
-              m.zones.forEach((z) => {
+              m.zones.forEach(function(z) {
                 if (z.coords && z.coords.length > 0) {
                   var poly = L.polyline(z.coords, { 
                     color: z.color, 
@@ -490,7 +527,6 @@ export default function MapScreen() {
                 }
               });
               
-              // Zoom to fit the entire route
               if (routeSegments.length > 0) {
                 var group = L.featureGroup(routeSegments);
                 map.fitBounds(group.getBounds(), { padding: [50, 50] });
@@ -498,45 +534,73 @@ export default function MapScreen() {
             }
 
             if (m.type === "CLEAR_ZONES") { 
-              routeSegments.forEach(s => map.removeLayer(s)); 
+              routeSegments.forEach(function(s) { map.removeLayer(s); });
               routeSegments = [];
               hasActiveRoute = false;
             }
 
             if (m.type === "SET_JEEPS") {
-              // Store jeeps data
-              m.jeeps.forEach(j => {
+              m.jeeps.forEach(function(j) {
                 jeepsData[j.id] = j;
               });
               
-              // Remove markers for jeeps that no longer exist
-              Object.keys(jeepMarkers).forEach(id => {
-                if (!m.jeeps.find(j => j.id === id)) {
+              // Remove markers that are no longer in the list
+              Object.keys(jeepMarkers).forEach(function(id) {
+                if (!m.jeeps.find(function(j) { return j.id === id; })) {
                   map.removeLayer(jeepMarkers[id]);
+                  
+                  // Also clear routes if this specific jeep was being viewed
+                  // You might want to keep the route or clear it. 
+                  // For now, we clear passenger lines if the jeep disappears.
+                  passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
+                  passengerViewRoutes = [];
+                  
                   delete jeepMarkers[id];
                 }
               });
               
-              // Update or create jeep markers
-              m.jeeps.forEach(j => {
+              m.jeeps.forEach(function(j) {
                 var isFull = (j.status === 'full');
+                
+                // Construct Popup Content
+                var destText = j.destination ? 'To ' + j.destination : 'Active Trip';
+                var popupHtml = '<div class="popup-header">' + destText + '</div>' +
+                                '<div class="popup-body">' + 
+                                   '<div class="fare-row"><span>Regular</span> <span>₱15.00</span></div>' +
+                                   '<div class="fare-row"><span>Student/Senior</span> <span>₱12.00</span></div>' +
+                                '</div>';
+
                 if (jeepMarkers[j.id]) {
+                  // Update existing marker
                   jeepMarkers[j.id].setLatLng([j.latitude, j.longitude]);
+                  
+                  // Update Popup content dynamically
+                  jeepMarkers[j.id].bindPopup(popupHtml);
+
                   var el = jeepMarkers[j.id].getElement();
                   if (el) {
                     if (isFull) el.classList.add('jeep-full');
                     else el.classList.remove('jeep-full');
                   }
                 } else {
+                  // Create new marker
                   var cssClass = 'jeep-marker' + (isFull ? ' jeep-full' : '');
                   var icon = L.divIcon({ className: cssClass, iconSize: [36, 36], html: '🚕' });
                   var marker = L.marker([j.latitude, j.longitude], { icon: icon }).addTo(map);
                   
-                  // Add click handler for passengers to view route
                   marker.jeepId = j.id;
+                  
+                  // Bind Popup
+                  marker.bindPopup(popupHtml, {
+                      closeButton: false,
+                      offset: [0, -10]
+                  });
+
+                  // Add Click Event to Show Route + Open Popup
                   marker.on('click', function(e) {
                     if (!isDriverMode) {
-                      showJeepRoute(this.jeepId);
+                      this.openPopup(); // Explicitly open the fare popup
+                      showJeepRoute(this.jeepId); // Draw the route line
                     }
                   });
                   
@@ -545,9 +609,12 @@ export default function MapScreen() {
               });
             }
           } catch(e) {
-            console.error('Map message error:', e);
+            console.error('❌ Message error:', e);
           }
-        });
+        }
+
+        window.addEventListener("message", handleMessage);
+        document.addEventListener("message", handleMessage);
       </script>
     </body>
     </html>
@@ -560,14 +627,43 @@ export default function MapScreen() {
         originWhitelist={['*']}
         source={{ html: mapHtml }}
         style={{ flex: 1 }}
+        javaScriptEnabled={true}
+        domStorageEnabled={true}
+        geolocationEnabled={true}
+        allowsInlineMediaPlayback={true}
+        mediaPlaybackRequiresUserAction={false}
+        mixedContentMode="always"
+        cacheEnabled={false}
+        onLoad={() => {
+          setWebViewLoaded(true);
+        }}
+        onError={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.error('❌ WebView error:', nativeEvent);
+        }}
+        onMessage={(event) => {
+          try {
+            const message = JSON.parse(event.nativeEvent.data);
+            if (message.type === 'MAP_READY') {
+              setWebViewLoaded(true);
+            }
+          } catch (e) {
+            console.error('Message parse error:', e);
+          }
+        }}
+        onHttpError={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.error('❌ HTTP Error:', nativeEvent.statusCode, nativeEvent.url);
+        }}
+        {...(Platform.OS === 'android' && {
+          androidHardwareAccelerationDisabled: false,
+          androidLayerType: 'hardware',
+        })}
       />
 
-      {/* DRIVER CONTROLS */}
       {role === 'driver' && (
         <View style={styles.driverPanel}>
-          
-          {/* Active Trip Card */}
-          {currentDest && (
+          {currentDest ? (
             <View style={styles.activeTripCard}>
               <View style={styles.tripHeader}>
                 <View style={styles.tripIconContainer}>
@@ -581,34 +677,21 @@ export default function MapScreen() {
                 </View>
               </View>
               
-              {/* SEPARATE LARGE STATUS BUTTONS */}
               <View style={styles.statusButtonsRow}>
                 <TouchableOpacity 
                   onPress={() => toggleStatus(false)} 
-                  style={[
-                    styles.statusButton, 
-                    styles.availableButton,
-                    !isFull && styles.statusButtonActive
-                  ]}
+                  style={[styles.statusButton, styles.availableButton, !isFull && styles.statusButtonActive]}
                 >
                   <Circle size={10} color={!isFull ? '#10B981' : '#9CA3AF'} fill={!isFull ? '#10B981' : '#9CA3AF'} />
-                  <Text style={[styles.statusButtonText, !isFull && styles.statusButtonTextActive]}>
-                    Available
-                  </Text>
+                  <Text style={[styles.statusButtonText, !isFull && styles.statusButtonTextActive]}>Available</Text>
                 </TouchableOpacity>
                 
                 <TouchableOpacity 
                   onPress={() => toggleStatus(true)} 
-                  style={[
-                    styles.statusButton, 
-                    styles.fullButton,
-                    isFull && styles.statusButtonActive
-                  ]}
+                  style={[styles.statusButton, styles.fullButton, isFull && styles.statusButtonActive]}
                 >
                   <Circle size={10} color={isFull ? '#EF4444' : '#9CA3AF'} fill={isFull ? '#EF4444' : '#9CA3AF'} />
-                  <Text style={[styles.statusButtonText, isFull && styles.statusButtonTextActive]}>
-                    Full
-                  </Text>
+                  <Text style={[styles.statusButtonText, isFull && styles.statusButtonTextActive]}>Full</Text>
                 </TouchableOpacity>
               </View>
               
@@ -617,10 +700,7 @@ export default function MapScreen() {
                 <Text style={styles.endTripText}>End Trip</Text>
               </TouchableOpacity>
             </View>
-          )}
-
-          {/* Start Trip Button */}
-          {!currentDest && (
+          ) : (
             <TouchableOpacity onPress={() => setRouteModalVisible(true)} style={styles.startTripCard}>
               <View style={styles.startTripContent}>
                 <View style={styles.startIconContainer}>
@@ -639,41 +719,27 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* DESTINATION MODAL */}
       <Modal visible={routeModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Select Destination</Text>
-            <Text style={styles.modalSubtitle}>Where are you heading?</Text>
             
-            <TouchableOpacity 
-              onPress={() => startTrip('Town')} 
-              style={styles.destinationCard}
-            >
+            <TouchableOpacity onPress={() => startTrip('Town')} style={styles.destinationCard}>
               <View style={[styles.destinationIcon, { backgroundColor: '#DBEAFE' }]}>
-                <MapPin color="#2563EB" size={24} />
+                <MapPin color="#15803d" size={24} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.destinationTitle}>Balacbac to Town</Text>
               </View>
-              <View style={styles.destinationArrow}>
-                <Text style={{ fontSize: 18, color: '#9CA3AF' }}>→</Text>
-              </View>
             </TouchableOpacity>
             
-            <TouchableOpacity 
-              onPress={() => startTrip('Balacbac')} 
-              style={styles.destinationCard}
-            >
+            <TouchableOpacity onPress={() => startTrip('Balacbac')} style={styles.destinationCard}>
               <View style={[styles.destinationIcon, { backgroundColor: '#FEF3C7' }]}>
                 <MapPin color="#D97706" size={24} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.destinationTitle}>Town to Balacbac</Text>
-              </View>
-              <View style={styles.destinationArrow}>
-                <Text style={{ fontSize: 18, color: '#9CA3AF' }}>→</Text>
               </View>
             </TouchableOpacity>
 
@@ -689,224 +755,68 @@ export default function MapScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8f9fa' },
-  
-  // Driver Panel
-  driverPanel: { 
-    position: 'absolute', 
-    bottom: 20, 
-    left: 16, 
-    right: 16,
-  },
-  
-  // Active Trip Card
+  driverPanel: { position: 'absolute', bottom: 20, left: 16, right: 16 },
   activeTripCard: {
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 16,
-    elevation: 8,
+    backgroundColor: 'white', borderRadius: 20, padding: 20,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15, shadowRadius: 16, elevation: 8,
   },
-  tripHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
+  tripHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
   tripIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#D1FAE5',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
+    width: 48, height: 48, borderRadius: 24, backgroundColor: '#D1FAE5',
+    alignItems: 'center', justifyContent: 'center', marginRight: 12,
   },
-  tripLabel: {
-    fontSize: 12,
-    color: '#6B7280',
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  tripDestination: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1F2937',
-    marginTop: 2,
-  },
-  
-  // LARGE SEPARATE STATUS BUTTONS
-  statusButtonsRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 16,
-  },
+  tripLabel: { fontSize: 12, color: '#6B7280', fontWeight: '600', textTransform: 'uppercase' },
+  tripDestination: { fontSize: 18, fontWeight: '700', color: '#1F2937' },
+  statusButtonsRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
   statusButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 18,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    gap: 8,
-    borderWidth: 2,
-    borderColor: '#E5E7EB',
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 18, borderRadius: 14, gap: 8, borderWidth: 2, borderColor: '#E5E7EB',
   },
-  statusButtonActive: {
-    borderWidth: 2,
-  },
-  availableButton: {
-    backgroundColor: '#F0FDF4',
-  },
-  fullButton: {
-    backgroundColor: '#FEF2F2',
-  },
-  statusButtonText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#6B7280',
-  },
-  statusButtonTextActive: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  
+  statusButtonActive: { borderColor: '#15803d' },
+  availableButton: { backgroundColor: '#F0FDF4' },
+  fullButton: { backgroundColor: '#FEF2F2' },
+  statusButtonText: { fontSize: 15, fontWeight: '700', color: '#6B7280' },
+  statusButtonTextActive: { color: '#1F2937' },
   endTripBtn: {
-    backgroundColor: '#FEE2E2',
-    borderRadius: 14,
-    paddingVertical: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    backgroundColor: '#FEE2E2', borderRadius: 14, paddingVertical: 16,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
   },
-  endTripText: {
-    color: '#DC2626',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  
-  // Start Trip Card
+  endTripText: { color: '#DC2626', fontWeight: '700', fontSize: 15 },
   startTripCard: {
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 16,
-    elevation: 8,
+    backgroundColor: 'white', borderRadius: 20, padding: 20,
+    shadowColor: '#000', shadowOpacity: 0.15, elevation: 8,
   },
-  startTripContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
+  startTripContent: { flexDirection: 'row', alignItems: 'center' },
   startIconContainer: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#667EEA',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 16,
+    width: 56, height: 56, borderRadius: 28, backgroundColor: '#15803d',
+    alignItems: 'center', justifyContent: 'center', marginRight: 16,
   },
-  startTripTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  startTripSubtitle: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginTop: 2,
-  },
+  startTripTitle: { fontSize: 18, fontWeight: '700' },
+  startTripSubtitle: { fontSize: 14, color: '#6B7280' },
   arrowContainer: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#667EEA',
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 32, height: 32, borderRadius: 16, backgroundColor: '#15803d',
+    alignItems: 'center', justifyContent: 'center'
   },
-  
-  // Modal
-  modalOverlay: { 
-    flex: 1, 
-    backgroundColor: 'rgba(0,0,0,0.6)', 
-    justifyContent: 'flex-end',
-  },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   modalContent: { 
-    backgroundColor: 'white', 
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    padding: 24,
-    paddingBottom: 40,
+    backgroundColor: 'white', borderTopLeftRadius: 32, borderTopRightRadius: 32,
+    padding: 24, paddingBottom: 40
   },
   modalHandle: {
-    width: 40,
-    height: 5,
-    backgroundColor: '#E5E7EB',
-    borderRadius: 3,
-    alignSelf: 'center',
-    marginBottom: 20,
+    width: 40, height: 5, backgroundColor: '#E5E7EB',
+    borderRadius: 3, alignSelf: 'center', marginBottom: 20
   },
-  modalTitle: { 
-    fontSize: 24, 
-    fontWeight: '700', 
-    color: '#1F2937',
-    marginBottom: 4,
-  },
-  modalSubtitle: {
-    fontSize: 15,
-    color: '#6B7280',
-    marginBottom: 24,
-  },
-  
-  // Destination Cards
+  modalTitle: { fontSize: 24, fontWeight: '700', marginBottom: 24 },
   destinationCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F9FAFB',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#F9FAFB',
+    borderRadius: 16, padding: 16, marginBottom: 12
   },
   destinationIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 16,
+    width: 52, height: 52, borderRadius: 26,
+    alignItems: 'center', justifyContent: 'center', marginRight: 16
   },
-  destinationTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  destinationSubtitle: {
-    fontSize: 13,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  destinationArrow: {
-    width: 32,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  
-  cancelBtn: {
-    marginTop: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  cancelText: {
-    color: '#6B7280',
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  destinationTitle: { fontSize: 16, fontWeight: '700' },
+  cancelBtn: { marginTop: 12, paddingVertical: 16, alignItems: 'center' },
+  cancelText: { color: '#6B7280', fontSize: 16, fontWeight: '600' },
 });
