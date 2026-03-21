@@ -3,8 +3,8 @@ import { View, StyleSheet, Text, TouchableOpacity, Modal, Alert, Animated, Platf
 import { WebView } from "react-native-webview";
 import * as Location from "expo-location";
 import * as TaskManager from 'expo-task-manager';
-import { Navigation as NavIcon, MapPin, Circle, XCircle } from "lucide-react-native"; 
-import { ref, onValue, update, get } from "firebase/database";
+import { Navigation as NavIcon, MapPin, Circle, XCircle, DollarSign } from "lucide-react-native"; 
+import { ref, onValue, update, get, remove } from "firebase/database";
 import { auth, db } from "../../services/firebase"; 
 import { FARE_ZONES } from "../../constants/routes"; 
 
@@ -49,6 +49,7 @@ export default function MapScreen() {
   const [isFull, setIsFull] = useState(false);
   const [routeModalVisible, setRouteModalVisible] = useState(false);
   const [currentDest, setCurrentDest] = useState<'Town' | 'Balacbac' | null>(null);
+  const [fareModalVisible, setFareModalVisible] = useState(false);
   
   const activeZonesRef = useRef<ExtendedZone[]>([]);
   const locationSub = useRef<any>(null);
@@ -90,8 +91,10 @@ export default function MapScreen() {
   const postMessageToWebView = (message: any) => {
     if (webViewRef.current && webViewLoaded) {
       const messageStr = JSON.stringify(message);
-      // console.log('Sending to WebView:', message.type);
+      console.log('Sending to WebView:', message.type);
       webViewRef.current.postMessage(messageStr);
+    } else {
+      console.log('WebView not ready, message dropped:', message.type);
     }
   };
 
@@ -189,10 +192,8 @@ export default function MapScreen() {
           }
           
           if (auth.currentUser) {
-            update(ref(db, `jeeps/${auth.currentUser.uid}`), { 
-              destination: null,
-              status: 'available'
-            });
+            // Remove the jeep marker from Firebase completely
+            await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
           }
         }
       }
@@ -242,18 +243,15 @@ export default function MapScreen() {
       const unsubscribe = onValue(jeepsRef, (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.val();
-          // Filter: Only include jeeps that have a valid destination (active trip)
-          // This ensures that when a driver stops a trip (destination becomes null),
-          // they are removed from the list sent to the map.
-          const jeepsArray = Object.keys(data)
-            .map(key => ({ id: key, ...data[key] }))
-            .filter(j => j.destination && j.latitude && j.longitude); 
-            
-          console.log('Firebase: Active Jeeps:', jeepsArray.length);
+          const jeepsArray = Object.keys(data).map(key => ({
+            id: key,
+            ...data[key]
+          }));
+          console.log('Firebase: Got', jeepsArray.length, 'jeeps');
           postMessageToWebView({ type: "SET_JEEPS", jeeps: jeepsArray });
         } else {
-            // If no data exists, send empty array so map clears everyone
-            postMessageToWebView({ type: "SET_JEEPS", jeeps: [] });
+          // No jeeps in database, clear all markers
+          postMessageToWebView({ type: "SET_JEEPS", jeeps: [] });
         }
       }, (error) => {
         console.log('Firebase listener error:', error);
@@ -302,34 +300,6 @@ export default function MapScreen() {
           background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
           box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4) !important;
         }
-        /* Custom Popup Style */
-        .leaflet-popup-content-wrapper {
-            border-radius: 12px;
-            padding: 0;
-            overflow: hidden;
-        }
-        .leaflet-popup-content {
-            margin: 0;
-            width: 160px !important;
-        }
-        .popup-header {
-            background: #10b981;
-            color: white;
-            padding: 8px;
-            font-weight: bold;
-            text-align: center;
-        }
-        .popup-body {
-            padding: 10px;
-            text-align: center;
-        }
-        .fare-row {
-            display: flex;
-            justify-content: space-between;
-            font-size: 13px;
-            margin-bottom: 4px;
-            color: #374151;
-        }
       </style>
     </head>
     <body>
@@ -357,6 +327,7 @@ export default function MapScreen() {
         console.log('Map initialized');
 
         setTimeout(function() {
+          console.log('Sending MAP_READY signal');
           if (window.ReactNativeWebView) {
             window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
           }
@@ -384,9 +355,12 @@ export default function MapScreen() {
           if (lastPointDist < 40) {
             map.removeLayer(currentPoly);
             routeSegments.shift();
+            
             if (routeSegments.length > 0) {
               var nextPoints = routeSegments[0].getLatLngs();
-              if (nextPoints.length > 0) map.panTo(nextPoints[0]);
+              if (nextPoints.length > 0) {
+                map.panTo(nextPoints[0]);
+              }
             }
             return;
           }
@@ -400,12 +374,24 @@ export default function MapScreen() {
 
         function showJeepRoute(jeepId) {
           console.log('Showing route for jeep:', jeepId);
+          
           // Clear previous passenger routes
           passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
           passengerViewRoutes = [];
           
           var jeep = jeepsData[jeepId];
-          if (!jeep || !jeep.destination) return;
+          if (!jeep || !jeep.destination) {
+            console.log('No active route for jeep');
+            
+            // Send message to show fare modal even without route
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({ 
+                type: 'SHOW_FARE_MODAL',
+                jeepId: jeepId
+              }));
+            }
+            return;
+          }
           
           var POINTS = {
             TOWN: [16.414019, 120.593455],
@@ -446,7 +432,10 @@ export default function MapScreen() {
                 }
                 return { coords: [], color: color };
               })
-              .catch(function(err) { return { coords: [], color: color }; });
+              .catch(function(err) {
+                console.log('Route fetch error:', err);
+                return { coords: [], color: color };
+              });
           });
           
           Promise.all(fetchPromises).then(function(zoneData) {
@@ -477,18 +466,26 @@ export default function MapScreen() {
               }
             });
             
-            // Do NOT fit bounds here automatically, it might annoy the user if they are panning.
-            // But if you want to focus on the route, you can uncomment this:
-            // if (passengerViewRoutes.length > 0) {
-            //   var group = L.featureGroup(passengerViewRoutes);
-            //   map.fitBounds(group.getBounds(), { padding: [50, 50] });
-            // }
+            if (passengerViewRoutes.length > 0) {
+              var group = L.featureGroup(passengerViewRoutes);
+              map.fitBounds(group.getBounds(), { padding: [50, 50] });
+            }
+            
+            // Send message to show fare modal with route info
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({ 
+                type: 'SHOW_FARE_MODAL',
+                jeepId: jeepId,
+                destination: destination
+              }));
+            }
           });
         }
 
         function handleMessage(event) {
           try {
             var m = JSON.parse(event.data);
+            console.log('📨 Received:', m.type);
             
             if (m.type === "SET_LOCATION") {
               isDriverMode = m.isDriver;
@@ -498,6 +495,7 @@ export default function MapScreen() {
                 var icon = L.divIcon({ className: 'user-dot', iconSize: [20, 20] });
                 userMarker = L.marker([m.lat, m.lng], { icon: icon }).addTo(map);
                 map.panTo([m.lat, m.lng]);
+                console.log('✅ User marker created');
               } else {
                 userMarker.setLatLng([m.lat, m.lng]);
                 if (isDriverMode && hasActiveRoute) {
@@ -511,6 +509,7 @@ export default function MapScreen() {
             }
             
             if (m.type === "DRAW_ZONES") {
+              console.log('🎨 Drawing', m.zones.length, 'zones');
               routeSegments.forEach(function(s) { map.removeLayer(s); });
               routeSegments = [];
               
@@ -540,71 +539,49 @@ export default function MapScreen() {
             }
 
             if (m.type === "SET_JEEPS") {
+              console.log('🚕 Setting', m.jeeps.length, 'jeeps');
+              
+              // Update jeeps data
+              var newJeepsData = {};
               m.jeeps.forEach(function(j) {
-                jeepsData[j.id] = j;
+                newJeepsData[j.id] = j;
               });
               
-              // Remove markers that are no longer in the list
+              // Remove markers that no longer exist in Firebase
               Object.keys(jeepMarkers).forEach(function(id) {
                 if (!m.jeeps.find(function(j) { return j.id === id; })) {
+                  console.log('🗑️ Removing jeep marker:', id);
                   map.removeLayer(jeepMarkers[id]);
-                  
-                  // Also clear routes if this specific jeep was being viewed
-                  // You might want to keep the route or clear it. 
-                  // For now, we clear passenger lines if the jeep disappears.
-                  passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
-                  passengerViewRoutes = [];
-                  
                   delete jeepMarkers[id];
+                  delete jeepsData[id];
                 }
               });
               
+              // Update jeepsData
+              jeepsData = newJeepsData;
+              
+              // Create or update jeep markers
               m.jeeps.forEach(function(j) {
                 var isFull = (j.status === 'full');
-                
-                // Construct Popup Content
-                var destText = j.destination ? 'To ' + j.destination : 'Active Trip';
-                var popupHtml = '<div class="popup-header">' + destText + '</div>' +
-                                '<div class="popup-body">' + 
-                                   '<div class="fare-row"><span>Regular</span> <span>₱15.00</span></div>' +
-                                   '<div class="fare-row"><span>Student/Senior</span> <span>₱12.00</span></div>' +
-                                '</div>';
-
                 if (jeepMarkers[j.id]) {
-                  // Update existing marker
                   jeepMarkers[j.id].setLatLng([j.latitude, j.longitude]);
-                  
-                  // Update Popup content dynamically
-                  jeepMarkers[j.id].bindPopup(popupHtml);
-
                   var el = jeepMarkers[j.id].getElement();
                   if (el) {
                     if (isFull) el.classList.add('jeep-full');
                     else el.classList.remove('jeep-full');
                   }
                 } else {
-                  // Create new marker
                   var cssClass = 'jeep-marker' + (isFull ? ' jeep-full' : '');
                   var icon = L.divIcon({ className: cssClass, iconSize: [36, 36], html: '🚕' });
                   var marker = L.marker([j.latitude, j.longitude], { icon: icon }).addTo(map);
                   
                   marker.jeepId = j.id;
-                  
-                  // Bind Popup
-                  marker.bindPopup(popupHtml, {
-                      closeButton: false,
-                      offset: [0, -10]
-                  });
-
-                  // Add Click Event to Show Route + Open Popup
                   marker.on('click', function(e) {
-                    if (!isDriverMode) {
-                      this.openPopup(); // Explicitly open the fare popup
-                      showJeepRoute(this.jeepId); // Draw the route line
-                    }
+                    showJeepRoute(this.jeepId);
                   });
                   
                   jeepMarkers[j.id] = marker;
+                  console.log('✅ Jeep marker created:', j.id);
                 }
               });
             }
@@ -615,6 +592,8 @@ export default function MapScreen() {
 
         window.addEventListener("message", handleMessage);
         document.addEventListener("message", handleMessage);
+        
+        console.log('=== EVENT LISTENERS REGISTERED ===');
       </script>
     </body>
     </html>
@@ -635,6 +614,7 @@ export default function MapScreen() {
         mixedContentMode="always"
         cacheEnabled={false}
         onLoad={() => {
+          console.log('✅ WebView loaded');
           setWebViewLoaded(true);
         }}
         onError={(syntheticEvent) => {
@@ -644,8 +624,16 @@ export default function MapScreen() {
         onMessage={(event) => {
           try {
             const message = JSON.parse(event.nativeEvent.data);
+            console.log('📨 Message from WebView:', message.type);
+            
             if (message.type === 'MAP_READY') {
+              console.log('✅ Map is ready!');
               setWebViewLoaded(true);
+            }
+            
+            if (message.type === 'SHOW_FARE_MODAL') {
+              console.log('Opening fare modal for passenger/guest');
+              setFareModalVisible(true);
             }
           } catch (e) {
             console.error('Message parse error:', e);
@@ -719,6 +707,7 @@ export default function MapScreen() {
         </View>
       )}
 
+      {/* DESTINATION MODAL */}
       <Modal visible={routeModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
