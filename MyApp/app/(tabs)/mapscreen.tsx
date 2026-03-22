@@ -53,6 +53,7 @@ export default function MapScreen() {
   
   const activeZonesRef = useRef<ExtendedZone[]>([]);
   const locationSub = useRef<any>(null);
+  const currentLocationRef = useRef<{ lat: number; lng: number } | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const [webViewLoaded, setWebViewLoaded] = useState(false);
 
@@ -100,7 +101,7 @@ export default function MapScreen() {
 
   const startTrip = async (destination: 'Town' | 'Balacbac') => {
     postMessageToWebView({ type: "CLEAR_ZONES" });
-    
+
     if (role === 'driver') {
       const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
       if (bgStatus === 'granted') {
@@ -116,62 +117,27 @@ export default function MapScreen() {
         });
       }
     }
-    
-    const baseZones: ExtendedZone[] = FARE_ZONES.map((z, i) => ({ ...z, originalIndex: i }));
-    const zonesToProcess = destination === 'Town' ? [...baseZones].reverse() : [...baseZones];
+
     const originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
-    const reversedColors = [...originalColors].reverse();
-    const colorsToUse = destination === 'Town' ? reversedColors : originalColors;
 
-    const zoneData = await Promise.all(zonesToProcess.map(async (zone, idx) => {
-      const start = destination === 'Town' ? zone.pts[1] : zone.pts[0];
-      const end = destination === 'Town' ? zone.pts[0] : zone.pts[1];
-      const zoneColor = colorsToUse[idx];
-      
-      try {
-        const resp = await fetch(`https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson`);
-        const data = await resp.json();
-        
-        if (data.routes && data.routes[0]) {
-           return { 
-             coords: data.routes[0].geometry.coordinates.map((c: any) => [c[1], c[0]]), 
-             color: zoneColor 
-           };
-        }
-        return { coords: [], color: zoneColor };
-      } catch (e) { 
-        console.log('Route fetch error:', e);
-        return { coords: [], color: zoneColor }; 
-      }
-    }));
-
-    for (let i = 0; i < zoneData.length - 1; i++) {
-      if (zoneData[i].coords.length > 0 && zoneData[i + 1].coords.length > 0) {
-        const lastPoint = zoneData[i].coords[zoneData[i].coords.length - 1];
-        const nextFirstPoint = zoneData[i + 1].coords[0];
-        const distance = Math.sqrt(
-          Math.pow(lastPoint[0] - nextFirstPoint[0], 2) + 
-          Math.pow(lastPoint[1] - nextFirstPoint[1], 2)
-        );
-        if (distance > 0.0001) {
-          zoneData[i + 1].coords.unshift(lastPoint);
-        }
-      }
-    }
-
-    postMessageToWebView({ 
-      type: "DRAW_ZONES", 
-      zones: zoneData,
-      destination: destination 
+    // Send all the raw zone waypoints + driver location to the WebView.
+    // The WebView will do a single multi-waypoint OSRM call so the road
+    // geometry is always correct (no straight-line gaps between zones).
+    postMessageToWebView({
+      type: "DRAW_ZONES",
+      destination,
+      driverLat: currentLocationRef.current?.lat ?? null,
+      driverLng: currentLocationRef.current?.lng ?? null,
+      zoneColors: destination === 'Town' ? [...originalColors].reverse() : originalColors,
     });
-    
+
     setCurrentDest(destination);
     setRouteModalVisible(false);
-    
+
     if (auth.currentUser) {
-      update(ref(db, `jeeps/${auth.currentUser.uid}`), { 
-        destination: destination,
-        status: isFull ? 'full' : 'available'
+      update(ref(db, `jeeps/${auth.currentUser.uid}`), {
+        destination,
+        status: isFull ? 'full' : 'available',
       });
     }
   };
@@ -192,7 +158,6 @@ export default function MapScreen() {
           }
           
           if (auth.currentUser) {
-            // Remove the jeep marker from Firebase completely
             await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
           }
         }
@@ -222,6 +187,9 @@ export default function MapScreen() {
         (pos) => {
           const { latitude, longitude } = pos.coords;
 
+          // Always keep the latest position so startTrip can use it
+          currentLocationRef.current = { lat: latitude, lng: longitude };
+
           postMessageToWebView({ 
             type: "SET_LOCATION", 
             lat: latitude, 
@@ -250,7 +218,6 @@ export default function MapScreen() {
           console.log('Firebase: Got', jeepsArray.length, 'jeeps');
           postMessageToWebView({ type: "SET_JEEPS", jeeps: jeepsArray });
         } else {
-          // No jeeps in database, clear all markers
           postMessageToWebView({ type: "SET_JEEPS", jeeps: [] });
         }
       }, (error) => {
@@ -306,174 +273,231 @@ export default function MapScreen() {
       <div id="map"></div>
       <script>
         console.log('=== MAP SCRIPT STARTING ===');
-        
-        var map = L.map('map', { 
-          zoomControl: false, 
-          attributionControl: false 
+
+        var map = L.map('map', {
+          zoomControl: false,
+          attributionControl: false,
+          preferCanvas: true
         }).setView([16.4023, 120.5960], 14);
-        
+
         L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
           maxZoom: 19
         }).addTo(map);
 
         var userMarker = null;
         var jeepMarkers = {};
-        var routeSegments = [];
-        var passengerViewRoutes = [];
+        var routeSegments = [];       // driver view layers (triplets)
+        var passengerViewRoutes = []; // passenger view layers
         var isDriverMode = false;
         var hasActiveRoute = false;
         var jeepsData = {};
 
-        console.log('Map initialized');
+        // ─── Fixed route waypoints ────────────────────────────────────────────────
+        var ROUTE_POINTS = {
+          TOWN:       [16.414019, 120.593455],
+          SHELL:      [16.393590, 120.579564],
+          JUNCTION:   [16.388988, 120.575658],
+          INTERIOR_A: [16.386876, 120.576439],
+          CENTRO:     [16.380109, 120.579936],
+          FRIENDSHIP: [16.378661, 120.580563],
+          TIERRA:     [16.378759, 120.586049],
+        };
+
+        // Ordered waypoints for the full route (Town → Tierra direction)
+        // Each segment between consecutive points = one fare zone
+        var ROUTE_WAYPOINTS_FWD = [
+          ROUTE_POINTS.TOWN,
+          ROUTE_POINTS.SHELL,
+          ROUTE_POINTS.JUNCTION,
+          ROUTE_POINTS.INTERIOR_A,
+          ROUTE_POINTS.CENTRO,
+          ROUTE_POINTS.FRIENDSHIP,
+          ROUTE_POINTS.TIERRA,
+        ];
+
+        // Zone boundary indices into ROUTE_WAYPOINTS_FWD (0-based, inclusive pairs)
+        // z1: TOWN→SHELL (idx 0→1), z2: SHELL→JUNCTION (1→2),
+        // z3: INTERIOR_A→CENTRO (3→4), z4: FRIENDSHIP→TIERRA (5→6)
+        var ZONE_SEGMENT_RANGES = [
+          { start: 0, end: 1 },  // zone 1
+          { start: 1, end: 2 },  // zone 2
+          { start: 3, end: 4 },  // zone 3
+          { start: 5, end: 6 },  // zone 4
+        ];
 
         setTimeout(function() {
-          console.log('Sending MAP_READY signal');
           if (window.ReactNativeWebView) {
             window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
           }
         }, 500);
 
-        function updateNavigatorRoute(lat, lng) {
-          if (routeSegments.length === 0 || !hasActiveRoute) return;
+        // ─── Waze/Grab-style layered polyline ────────────────────────────────────
+        function hexToRgb(hex) {
+          var r = /^#?([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i.exec(hex);
+          return r ? { r: parseInt(r[1],16), g: parseInt(r[2],16), b: parseInt(r[3],16) }
+                   : { r: 0, g: 0, b: 0 };
+        }
+        function darkenColor(hex, factor) {
+          var c = hexToRgb(hex);
+          return 'rgb('+Math.round(c.r*factor)+','+Math.round(c.g*factor)+','+Math.round(c.b*factor)+')';
+        }
+        function drawNavRoute(coords, color, layerArray) {
+          if (!coords || coords.length === 0) return;
+          var opts = { lineCap: 'round', lineJoin: 'round', smoothFactor: 1 };
+          var casing  = L.polyline(coords, Object.assign({}, opts, { color: 'rgba(255,255,255,0.95)', weight: 16, opacity: 1   })).addTo(map);
+          var outline = L.polyline(coords, Object.assign({}, opts, { color: darkenColor(color, 0.55),            weight: 12, opacity: 0.6  })).addTo(map);
+          var fill    = L.polyline(coords, Object.assign({}, opts, { color: color,                               weight: 8,  opacity: 1   })).addTo(map);
+          layerArray.push(casing, outline, fill);
+        }
+        // ─────────────────────────────────────────────────────────────────────────
 
-          var currentPoly = routeSegments[0];
-          var points = currentPoly.getLatLngs();
-          if (!points || points.length === 0) return;
-
-          var closestDist = Infinity;
-          var closestIdx = -1;
-
-          for (var i = 0; i < points.length; i++) {
-            var d = map.distance([lat, lng], points[i]);
-            if (d < closestDist) {
-              closestDist = d;
-              closestIdx = i;
-            }
-          }
-
-          var lastPointDist = map.distance([lat, lng], points[points.length - 1]);
-          if (lastPointDist < 40) {
-            map.removeLayer(currentPoly);
-            routeSegments.shift();
-            
-            if (routeSegments.length > 0) {
-              var nextPoints = routeSegments[0].getLatLngs();
-              if (nextPoints.length > 0) {
-                map.panTo(nextPoints[0]);
-              }
-            }
-            return;
-          }
-
-          if (closestIdx !== -1 && closestIdx < points.length - 1) {
-            var remainingPoints = points.slice(closestIdx);
-            remainingPoints.unshift([lat, lng]);
-            currentPoly.setLatLngs(remainingPoints);
-          }
+        // ─── Full multi-waypoint OSRM fetch ──────────────────────────────────────
+        // Takes an ordered array of [lat,lng] waypoints and returns the road-snapped
+        // geometry split back into per-zone segments using the annotation indices.
+        function fetchFullRoute(waypoints) {
+          var coordStr = waypoints.map(function(p) { return p[1] + ',' + p[0]; }).join(';');
+          var url = 'https://router.project-osrm.org/route/v1/driving/' + coordStr
+                  + '?overview=full&geometries=geojson&annotations=false';
+          return fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (!data.routes || !data.routes[0]) return null;
+              // Full road geometry
+              var allCoords = data.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
+              return allCoords;
+            })
+            .catch(function(e) { console.log('OSRM error:', e); return null; });
         }
 
-        function showJeepRoute(jeepId) {
-          console.log('Showing route for jeep:', jeepId);
-          
-          // Clear previous passenger routes
-          passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
-          passengerViewRoutes = [];
-          
-          var jeep = jeepsData[jeepId];
-          if (!jeep || !jeep.destination) {
-            console.log('No active route for jeep');
-            
-            // Send message to show fare modal even without route
-            if (window.ReactNativeWebView) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({ 
-                type: 'SHOW_FARE_MODAL',
-                jeepId: jeepId
-              }));
+        // Given the full polyline coords and the via-waypoints from OSRM,
+        // split the geometry at the closest point to each zone boundary waypoint.
+        function splitRouteIntoZones(allCoords, boundaryLatLngs) {
+          // boundaryLatLngs = the zone-boundary points (not including start/end of whole route)
+          var segments = [];
+          var remaining = allCoords.slice();
+
+          for (var b = 0; b < boundaryLatLngs.length; b++) {
+            var target = boundaryLatLngs[b];
+            var bestIdx = 0;
+            var bestDist = Infinity;
+            for (var i = 0; i < remaining.length; i++) {
+              var d = Math.pow(remaining[i][0] - target[0], 2) + Math.pow(remaining[i][1] - target[1], 2);
+              if (d < bestDist) { bestDist = d; bestIdx = i; }
+            }
+            segments.push(remaining.slice(0, bestIdx + 1));
+            remaining = remaining.slice(bestIdx);
+          }
+          segments.push(remaining); // last segment
+          return segments;
+        }
+
+        // Build and draw the full route starting from originLatLng through all
+        // zone waypoints in direction order, colouring each zone segment.
+        function buildAndDrawRoute(originLat, originLng, destination, zoneColors, layerArray) {
+          // Choose waypoint order based on destination
+          var orderedWaypoints = destination === 'Balacbac'
+            ? ROUTE_WAYPOINTS_FWD.slice()           // Town → Tierra
+            : ROUTE_WAYPOINTS_FWD.slice().reverse(); // Tierra → Town
+
+          // Prepend driver/jeep current position as the route origin
+          var allWaypoints = [[originLat, originLng]].concat(orderedWaypoints);
+
+          // Zone boundary waypoints (all except the very first and very last of allWaypoints)
+          // These are used to split the returned geometry into coloured segments
+          var boundaries = allWaypoints.slice(1, allWaypoints.length - 1);
+
+          return fetchFullRoute(allWaypoints).then(function(allCoords) {
+            if (!allCoords) return;
+
+            // Split the full geometry at each intermediate waypoint
+            var rawSegments = splitRouteIntoZones(allCoords, boundaries);
+
+            // We have (waypoints-1) raw segments; map them to zone colors.
+            // The first raw segment is from the driver to the first zone waypoint — 
+            // it gets the color of zone 1 (the zone the driver is currently in/approaching).
+            // Subsequent raw segments map to zone colors in order.
+            // Because zones 1+2 share waypoints and zones 3+4 share waypoints there
+            // are 6 raw segments (driver→TOWN, TOWN→SHELL … FRIENDSHIP→TIERRA for Balacbac).
+            // We need to merge the segments that belong to the same colour zone.
+            // Simpler approach: just colour every segment with the color of the zone
+            // that its end-waypoint belongs to, falling back gracefully.
+
+            rawSegments.forEach(function(seg, idx) {
+              // Map raw segment index → zone colour index
+              // raw[0] = driver→first_waypoint (pre-zone, use zone[0] color)
+              // raw[1..N] = between zone waypoints → use zone color[idx-1] capped
+              var colorIdx = Math.min(idx, zoneColors.length - 1);
+              // For Balacbac direction colors are already pre-reversed from RN side
+              drawNavRoute(seg, zoneColors[colorIdx], layerArray);
+            });
+
+            if (layerArray.length > 0) {
+              var fills = layerArray.filter(function(_, i) { return i % 3 === 2; });
+              if (fills.length > 0) {
+                map.fitBounds(L.featureGroup(fills).getBounds(), { padding: [50, 50] });
+              }
+            }
+          });
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // ─── Live route trimming (driver view) ───────────────────────────────────
+        function updateNavigatorRoute(lat, lng) {
+          var fills = routeSegments.filter(function(_, i) { return i % 3 === 2; });
+          if (fills.length === 0 || !hasActiveRoute) return;
+
+          var currentFill = fills[0];
+          var points = currentFill.getLatLngs();
+          if (!points || points.length === 0) return;
+
+          // If we've reached the end of this segment, drop the whole triplet
+          var lastDist = map.distance([lat, lng], points[points.length - 1]);
+          if (lastDist < 40) {
+            for (var t = 0; t < 3; t++) {
+              if (routeSegments[0]) { map.removeLayer(routeSegments[0]); routeSegments.shift(); }
             }
             return;
           }
-          
-          var POINTS = {
-            TOWN: [16.414019, 120.593455],
-            SHELL: [16.393590, 120.579564],
-            JUNCTION: [16.388988, 120.575658],
-            INTERIOR_A: [16.386876, 120.576439],
-            CENTRO: [16.380109, 120.579936],
-            FRIENDSHIP: [16.378661, 120.580563],
-            TIERRA: [16.378759, 120.586049],
-          };
-          
-          var FARE_ZONES = [
-            { id: 'z1', pts: [POINTS.TOWN, POINTS.SHELL] },
-            { id: 'z2', pts: [POINTS.SHELL, POINTS.JUNCTION] },
-            { id: 'z3', pts: [POINTS.INTERIOR_A, POINTS.CENTRO] },
-            { id: 'z4', pts: [POINTS.FRIENDSHIP, POINTS.TIERRA] },
-          ];
-          
-          var destination = jeep.destination;
-          var zonesToProcess = destination === 'Town' ? FARE_ZONES.slice().reverse() : FARE_ZONES;
-          var originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
-          var reversedColors = originalColors.slice().reverse();
-          var colorsToUse = destination === 'Town' ? reversedColors : originalColors;
-          
-          var fetchPromises = zonesToProcess.map(function(zone, idx) {
-            var start = destination === 'Town' ? zone.pts[1] : zone.pts[0];
-            var end = destination === 'Town' ? zone.pts[0] : zone.pts[1];
-            var color = colorsToUse[idx];
-            
-            return fetch('https://router.project-osrm.org/route/v1/driving/' + start[1] + ',' + start[0] + ';' + end[1] + ',' + end[0] + '?overview=full&geometries=geojson')
-              .then(function(resp) { return resp.json(); })
-              .then(function(data) {
-                if (data.routes && data.routes[0]) {
-                  return {
-                    coords: data.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; }),
-                    color: color
-                  };
-                }
-                return { coords: [], color: color };
-              })
-              .catch(function(err) {
-                console.log('Route fetch error:', err);
-                return { coords: [], color: color };
-              });
-          });
-          
-          Promise.all(fetchPromises).then(function(zoneData) {
-            for (var i = 0; i < zoneData.length - 1; i++) {
-              if (zoneData[i].coords.length > 0 && zoneData[i + 1].coords.length > 0) {
-                var lastPoint = zoneData[i].coords[zoneData[i].coords.length - 1];
-                var nextFirstPoint = zoneData[i + 1].coords[0];
-                var distance = Math.sqrt(
-                  Math.pow(lastPoint[0] - nextFirstPoint[0], 2) + 
-                  Math.pow(lastPoint[1] - nextFirstPoint[1], 2)
-                );
-                if (distance > 0.0001) {
-                  zoneData[i + 1].coords.unshift(lastPoint);
-                }
-              }
-            }
-            
-            zoneData.forEach(function(z) {
-              if (z.coords && z.coords.length > 0) {
-                var poly = L.polyline(z.coords, { 
-                  color: z.color, 
-                  weight: 6, 
-                  opacity: 0.85, 
-                  lineCap: 'round',
-                  lineJoin: 'round'
-                }).addTo(map);
-                passengerViewRoutes.push(poly);
-              }
+
+          // Trim the leading portion of all 3 layers to the driver's current position
+          var closestIdx = 0, closestDist = Infinity;
+          for (var i = 0; i < points.length; i++) {
+            var d = map.distance([lat, lng], points[i]);
+            if (d < closestDist) { closestDist = d; closestIdx = i; }
+          }
+          if (closestIdx > 0 && closestIdx < points.length - 1) {
+            var trimmed = [[lat, lng]].concat(points.slice(closestIdx + 1));
+            [0, 1, 2].forEach(function(offset) {
+              if (routeSegments[offset]) routeSegments[offset].setLatLngs(trimmed);
             });
-            
-            if (passengerViewRoutes.length > 0) {
-              var group = L.featureGroup(passengerViewRoutes);
-              map.fitBounds(group.getBounds(), { padding: [50, 50] });
-            }
-            
-            // Send message to show fare modal with route info
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
+        function showJeepRoute(jeepId) {
+          passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
+          passengerViewRoutes = [];
+
+          var jeep = jeepsData[jeepId];
+          if (!jeep || !jeep.destination || !jeep.latitude || !jeep.longitude) {
             if (window.ReactNativeWebView) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({ 
+              window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SHOW_FARE_MODAL', jeepId: jeepId }));
+            }
+            return;
+          }
+
+          var destination = jeep.destination;
+          var originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
+          var zoneColors = destination === 'Town' ? originalColors.slice().reverse() : originalColors;
+
+          buildAndDrawRoute(
+            jeep.latitude, jeep.longitude,
+            destination,
+            zoneColors,
+            passengerViewRoutes
+          ).then(function() {
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
                 type: 'SHOW_FARE_MODAL',
                 jeepId: jeepId,
                 destination: destination
@@ -485,17 +509,16 @@ export default function MapScreen() {
         function handleMessage(event) {
           try {
             var m = JSON.parse(event.data);
-            console.log('📨 Received:', m.type);
-            
+            console.log('Received:', m.type);
+
             if (m.type === "SET_LOCATION") {
               isDriverMode = m.isDriver;
               hasActiveRoute = m.hasActiveRoute || false;
-              
+
               if (!userMarker) {
                 var icon = L.divIcon({ className: 'user-dot', iconSize: [20, 20] });
                 userMarker = L.marker([m.lat, m.lng], { icon: icon }).addTo(map);
                 map.panTo([m.lat, m.lng]);
-                console.log('✅ User marker created');
               } else {
                 userMarker.setLatLng([m.lat, m.lng]);
                 if (isDriverMode && hasActiveRoute) {
@@ -507,60 +530,46 @@ export default function MapScreen() {
                 updateNavigatorRoute(m.lat, m.lng);
               }
             }
-            
+
             if (m.type === "DRAW_ZONES") {
-              console.log('🎨 Drawing', m.zones.length, 'zones');
+              // Clear old layers
               routeSegments.forEach(function(s) { map.removeLayer(s); });
               routeSegments = [];
-              
-              m.zones.forEach(function(z) {
-                if (z.coords && z.coords.length > 0) {
-                  var poly = L.polyline(z.coords, { 
-                    color: z.color, 
-                    weight: 8, 
-                    opacity: 0.9, 
-                    lineCap: 'round',
-                    lineJoin: 'round'
-                  }).addTo(map);
-                  routeSegments.push(poly);
-                }
-              });
-              
-              if (routeSegments.length > 0) {
-                var group = L.featureGroup(routeSegments);
-                map.fitBounds(group.getBounds(), { padding: [50, 50] });
+
+              // Use driver's current location if available, otherwise fall back to
+              // the first zone waypoint in the chosen direction
+              var originLat = m.driverLat;
+              var originLng = m.driverLng;
+              if (originLat === null || originLat === undefined) {
+                var fallback = m.destination === 'Balacbac'
+                  ? ROUTE_WAYPOINTS_FWD[0]
+                  : ROUTE_WAYPOINTS_FWD[ROUTE_WAYPOINTS_FWD.length - 1];
+                originLat = fallback[0];
+                originLng = fallback[1];
               }
+
+              hasActiveRoute = true;
+              buildAndDrawRoute(originLat, originLng, m.destination, m.zoneColors, routeSegments);
             }
 
-            if (m.type === "CLEAR_ZONES") { 
+            if (m.type === "CLEAR_ZONES") {
               routeSegments.forEach(function(s) { map.removeLayer(s); });
               routeSegments = [];
               hasActiveRoute = false;
             }
 
             if (m.type === "SET_JEEPS") {
-              console.log('🚕 Setting', m.jeeps.length, 'jeeps');
-              
-              // Update jeeps data
               var newJeepsData = {};
-              m.jeeps.forEach(function(j) {
-                newJeepsData[j.id] = j;
-              });
-              
-              // Remove markers that no longer exist in Firebase
+              m.jeeps.forEach(function(j) { newJeepsData[j.id] = j; });
+
               Object.keys(jeepMarkers).forEach(function(id) {
-                if (!m.jeeps.find(function(j) { return j.id === id; })) {
-                  console.log('🗑️ Removing jeep marker:', id);
+                if (!newJeepsData[id]) {
                   map.removeLayer(jeepMarkers[id]);
                   delete jeepMarkers[id];
-                  delete jeepsData[id];
                 }
               });
-              
-              // Update jeepsData
               jeepsData = newJeepsData;
-              
-              // Create or update jeep markers
+
               m.jeeps.forEach(function(j) {
                 var isFull = (j.status === 'full');
                 if (jeepMarkers[j.id]) {
@@ -574,25 +583,19 @@ export default function MapScreen() {
                   var cssClass = 'jeep-marker' + (isFull ? ' jeep-full' : '');
                   var icon = L.divIcon({ className: cssClass, iconSize: [36, 36], html: '🚕' });
                   var marker = L.marker([j.latitude, j.longitude], { icon: icon }).addTo(map);
-                  
                   marker.jeepId = j.id;
-                  marker.on('click', function(e) {
-                    showJeepRoute(this.jeepId);
-                  });
-                  
+                  marker.on('click', function() { showJeepRoute(this.jeepId); });
                   jeepMarkers[j.id] = marker;
-                  console.log('✅ Jeep marker created:', j.id);
                 }
               });
             }
           } catch(e) {
-            console.error('❌ Message error:', e);
+            console.error('Message error:', e);
           }
         }
 
         window.addEventListener("message", handleMessage);
         document.addEventListener("message", handleMessage);
-        
         console.log('=== EVENT LISTENERS REGISTERED ===');
       </script>
     </body>
@@ -614,25 +617,23 @@ export default function MapScreen() {
         mixedContentMode="always"
         cacheEnabled={false}
         onLoad={() => {
-          console.log('✅ WebView loaded');
+          console.log('WebView loaded');
           setWebViewLoaded(true);
         }}
         onError={(syntheticEvent) => {
           const { nativeEvent } = syntheticEvent;
-          console.error('❌ WebView error:', nativeEvent);
+          console.error('WebView error:', nativeEvent);
         }}
         onMessage={(event) => {
           try {
             const message = JSON.parse(event.nativeEvent.data);
-            console.log('📨 Message from WebView:', message.type);
+            console.log('Message from WebView:', message.type);
             
             if (message.type === 'MAP_READY') {
-              console.log('✅ Map is ready!');
               setWebViewLoaded(true);
             }
             
             if (message.type === 'SHOW_FARE_MODAL') {
-              console.log('Opening fare modal for passenger/guest');
               setFareModalVisible(true);
             }
           } catch (e) {
@@ -641,7 +642,7 @@ export default function MapScreen() {
         }}
         onHttpError={(syntheticEvent) => {
           const { nativeEvent } = syntheticEvent;
-          console.error('❌ HTTP Error:', nativeEvent.statusCode, nativeEvent.url);
+          console.error('HTTP Error:', nativeEvent.statusCode, nativeEvent.url);
         }}
         {...(Platform.OS === 'android' && {
           androidHardwareAccelerationDisabled: false,
