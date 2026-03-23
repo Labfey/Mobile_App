@@ -20,7 +20,7 @@ export default function JeepInfoScreen() {
     driverName: '',
     plate: '',
     route: 'Balacbac – Town',
-    profilePic: '' // For the driver's image URL
+    profilePic: ''
   });
 
   useEffect(() => {

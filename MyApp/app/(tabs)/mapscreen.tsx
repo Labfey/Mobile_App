@@ -1,12 +1,31 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, StyleSheet, Text, TouchableOpacity, Modal, Alert, Animated, Platform } from "react-native";
+import { View, StyleSheet, Text, TouchableOpacity, Modal, Alert, Animated, Platform, TextInput, KeyboardAvoidingView, Image } from "react-native";
 import { WebView } from "react-native-webview";
 import * as Location from "expo-location";
-import * as TaskManager from 'expo-task-manager';
-import { Navigation as NavIcon, MapPin, Circle, XCircle, DollarSign } from "lucide-react-native"; 
+import * as TaskManager from "expo-task-manager";
+import * as Notifications from "expo-notifications";
+import { Navigation as NavIcon, MapPin, Circle, XCircle, User, Truck, ChevronRight, X } from "lucide-react-native";
 import { ref, onValue, update, get, remove } from "firebase/database";
-import { auth, db } from "../../services/firebase"; 
-import { FARE_ZONES } from "../../constants/routes"; 
+import { auth, db } from "../../services/firebase";
+import { FARE_ZONES } from "../../constants/routes";
+
+// Show notifications even when app is in foreground
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,   // legacy SDK <50
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,  // required SDK >=50
+    shouldShowList: true,    // required SDK >=50
+  }),
+});
+
+// Terminal coords — departure notification fires when a driver starts from here
+const TERMINALS = {
+  TOWN:   { lat: 16.414019, lng: 120.593455, label: "Town Terminal" },
+  TIERRA: { lat: 16.378759, lng: 120.586049, label: "Balacbac Terminal" },
+};
+const TERMINAL_RADIUS_METERS = 80;
 
 const LOCATION_TASK_NAME = 'background-location-task';
 
@@ -57,6 +76,84 @@ export default function MapScreen() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const [webViewLoaded, setWebViewLoaded] = useState(false);
 
+  // ── Driver profile setup (name + plate) ─────────────────────────────────
+  const [profileModalVisible, setProfileModalVisible] = useState(false);
+  const [driverName, setDriverName] = useState('');
+  const [plateNumber, setPlateNumber] = useState('');
+  const [pendingDestination, setPendingDestination] = useState<'Town' | 'Balacbac' | null>(null);
+
+  // ── Driver info bottom sheet (passenger taps a jeep) ────────────────────
+  const [jeepInfoVisible, setJeepInfoVisible] = useState(false);
+  const [selectedJeepInfo, setSelectedJeepInfo] = useState<{
+    driverName: string;
+    plateNumber: string;
+    profilePic: string | null;
+    status: string;
+    destination: string | null;
+  } | null>(null);
+  const jeepSheetAnim = useRef(new Animated.Value(300)).current;
+
+  // ── In-app departure banner ──────────────────────────────────────────────
+  const [departureBanner, setDepartureBanner] = useState<{
+    visible: boolean;
+    message: string;
+    terminal: string;
+  }>({ visible: false, message: '', terminal: '' });
+  const bannerAnim = useRef(new Animated.Value(-100)).current;
+  // Track which jeep IDs have already fired a departure so we don't spam
+  const departedJeepsRef = useRef<Set<string>>(new Set());
+
+  // ── Notification permission ──────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('Notification permission not granted');
+      }
+    })();
+  }, []);
+
+  // ── Helpers ─────────────────────────────────────────────────────────────
+  const haversineMeters = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 +
+              Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+              Math.sin(dLng/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  };
+
+  const showDepartureBanner = (message: string, terminal: string) => {
+    setDepartureBanner({ visible: true, message, terminal });
+    Animated.sequence([
+      Animated.spring(bannerAnim, { toValue: 0, useNativeDriver: true, tension: 80, friction: 10 }),
+      Animated.delay(4000),
+      Animated.timing(bannerAnim, { toValue: -120, duration: 400, useNativeDriver: true }),
+    ]).start(() => setDepartureBanner(prev => ({ ...prev, visible: false })));
+  };
+
+  const sendPushNotification = async (title: string, body: string) => {
+    await Notifications.scheduleNotificationAsync({
+      content: { title, body, sound: true },
+      trigger: null, // fire immediately
+    });
+  };
+
+  const openJeepInfoSheet = (info: typeof selectedJeepInfo) => {
+    setSelectedJeepInfo(info);
+    setJeepInfoVisible(true);
+    Animated.spring(jeepSheetAnim, {
+      toValue: 0, useNativeDriver: true, tension: 80, friction: 12,
+    }).start();
+  };
+
+  const closeJeepInfoSheet = () => {
+    Animated.timing(jeepSheetAnim, {
+      toValue: 400, duration: 280, useNativeDriver: true,
+    }).start(() => setJeepInfoVisible(false));
+  };
+
   useEffect(() => {
     if (currentDest) {
       Animated.loop(
@@ -100,6 +197,23 @@ export default function MapScreen() {
   };
 
   const startTrip = async (destination: 'Town' | 'Balacbac') => {
+    // Check if driver has a name and plate set in jeep_info — prompt if not
+    if (auth.currentUser) {
+      const snap = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
+      const jeepData = snap.exists() ? snap.val() : {};
+      if (!jeepData.driverName || !jeepData.plate) {
+        setDriverName(jeepData.driverName || '');
+        setPlateNumber(jeepData.plate || '');
+        setPendingDestination(destination);
+        setRouteModalVisible(false);
+        setProfileModalVisible(true);
+        return; // wait for profile to be saved before continuing
+      }
+    }
+    await _executeStartTrip(destination);
+  };
+
+  const _executeStartTrip = async (destination: 'Town' | 'Balacbac') => {
     postMessageToWebView({ type: "CLEAR_ZONES" });
 
     if (role === 'driver') {
@@ -119,10 +233,6 @@ export default function MapScreen() {
     }
 
     const originalColors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
-
-    // Send all the raw zone waypoints + driver location to the WebView.
-    // The WebView will do a single multi-waypoint OSRM call so the road
-    // geometry is always correct (no straight-line gaps between zones).
     postMessageToWebView({
       type: "DRAW_ZONES",
       destination,
@@ -134,11 +244,47 @@ export default function MapScreen() {
     setCurrentDest(destination);
     setRouteModalVisible(false);
 
+    // Check if driver is departing from a terminal and fire notification
+    if (currentLocationRef.current) {
+      const { lat, lng } = currentLocationRef.current;
+      const nearTown   = haversineMeters(lat, lng, TERMINALS.TOWN.lat,   TERMINALS.TOWN.lng)   < TERMINAL_RADIUS_METERS;
+      const nearTierra = haversineMeters(lat, lng, TERMINALS.TIERRA.lat, TERMINALS.TIERRA.lng) < TERMINAL_RADIUS_METERS;
+      const terminalLabel = nearTown ? TERMINALS.TOWN.label : nearTierra ? TERMINALS.TIERRA.label : null;
+
+      if (terminalLabel) {
+        const msg = `A jeep has departed from ${terminalLabel} heading to ${destination === 'Town' ? 'Town' : 'Balacbac'}`;
+        sendPushNotification('🚌 Jeep Departed!', msg);
+        showDepartureBanner(msg, terminalLabel);
+      }
+    }
+
     if (auth.currentUser) {
       update(ref(db, `jeeps/${auth.currentUser.uid}`), {
         destination,
         status: isFull ? 'full' : 'available',
       });
+    }
+  };
+
+  const saveProfileAndStart = async () => {
+    if (!driverName.trim()) {
+      Alert.alert('Required', 'Please enter your name.'); return;
+    }
+    if (!plateNumber.trim()) {
+      Alert.alert('Required', 'Please enter your plate number.'); return;
+    }
+    if (auth.currentUser) {
+      await update(ref(db, `jeep_info/${auth.currentUser.uid}`), {
+        driverName: driverName.trim(),
+        plate: plateNumber.trim().toUpperCase(),
+        route: 'Balacbac – Town', // default route
+        updatedAt: Date.now(),
+      });
+    }
+    setProfileModalVisible(false);
+    if (pendingDestination) {
+      await _executeStartTrip(pendingDestination);
+      setPendingDestination(null);
     }
   };
 
@@ -174,63 +320,105 @@ export default function MapScreen() {
     }
   };
 
+  // Refs so callbacks always see the latest values without re-subscribing
+  const roleRef = useRef(role);
+  const currentDestRef = useRef(currentDest);
+  const webViewLoadedRef = useRef(webViewLoaded);
+  useEffect(() => { roleRef.current = role; }, [role]);
+  useEffect(() => { currentDestRef.current = currentDest; }, [currentDest]);
+  useEffect(() => { webViewLoadedRef.current = webViewLoaded; }, [webViewLoaded]);
+
+  // Location subscription — created ONCE, never torn down and re-created
   useEffect(() => {
     (async () => {
-      let { status } = await Location.requestForegroundPermissionsAsync();
+      const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         console.log('Location permission denied');
         return;
       }
 
       locationSub.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 5 }, 
+        { accuracy: Location.Accuracy.High, distanceInterval: 5 },
         (pos) => {
           const { latitude, longitude } = pos.coords;
-
-          // Always keep the latest position so startTrip can use it
           currentLocationRef.current = { lat: latitude, lng: longitude };
 
-          postMessageToWebView({ 
-            type: "SET_LOCATION", 
-            lat: latitude, 
-            lng: longitude,
-            isDriver: role === 'driver',
-            hasActiveRoute: currentDest !== null
-          });
+          // Read latest values from refs — avoids stale closure
+          const liveRole = roleRef.current;
+          const liveDest = currentDestRef.current;
+          const liveLoaded = webViewLoadedRef.current;
 
-          if (role === 'driver' && auth.currentUser) {
-             update(ref(db, `jeeps/${auth.currentUser.uid}`), { 
-               latitude, 
-               longitude
-             }).catch(err => console.log('Firebase update error:', err));
+          if (liveLoaded && webViewRef.current) {
+            webViewRef.current.postMessage(JSON.stringify({
+              type: "SET_LOCATION",
+              lat: latitude,
+              lng: longitude,
+              isDriver: liveRole === 'driver',
+              hasActiveRoute: liveDest !== null,
+            }));
+          }
+
+          if (liveRole === 'driver' && auth.currentUser) {
+            update(ref(db, `jeeps/${auth.currentUser.uid}`), {
+              latitude,
+              longitude,
+            }).catch(err => console.log('Firebase update error:', err));
           }
         }
       );
-
-      const jeepsRef = ref(db, 'jeeps');
-      const unsubscribe = onValue(jeepsRef, (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.val();
-          const jeepsArray = Object.keys(data).map(key => ({
-            id: key,
-            ...data[key]
-          }));
-          console.log('Firebase: Got', jeepsArray.length, 'jeeps');
-          postMessageToWebView({ type: "SET_JEEPS", jeeps: jeepsArray });
-        } else {
-          postMessageToWebView({ type: "SET_JEEPS", jeeps: [] });
-        }
-      }, (error) => {
-        console.log('Firebase listener error:', error);
-      });
-
-      return () => unsubscribe();
     })();
 
     return () => {
-      if (locationSub.current) locationSub.current.remove();
+      if (locationSub.current) {
+        locationSub.current.remove();
+        locationSub.current = null;
+      }
     };
-  }, [role, currentDest, webViewLoaded]);
+  }, []); // empty deps — subscribe once for the lifetime of the screen
+
+  // Firebase jeeps listener — watches for new departures too
+  useEffect(() => {
+    if (!webViewLoaded) return;
+
+    const jeepsRef = ref(db, 'jeeps');
+    const unsubscribe = onValue(jeepsRef, (snapshot) => {
+      const jeepsArray = snapshot.exists()
+        ? Object.keys(snapshot.val()).map(key => ({ id: key, ...snapshot.val()[key] }))
+        : [];
+
+      if (webViewRef.current) {
+        webViewRef.current.postMessage(JSON.stringify({ type: "SET_JEEPS", jeeps: jeepsArray }));
+      }
+
+      // Departure detection for passengers/guests:
+      // If a jeep appears that we haven't seen before AND it's at a terminal → notify
+      if (roleRef.current !== 'driver') {
+        jeepsArray.forEach((jeep: any) => {
+          if (!departedJeepsRef.current.has(jeep.id) && jeep.latitude && jeep.longitude && jeep.destination) {
+            const nearTown   = haversineMeters(jeep.latitude, jeep.longitude, TERMINALS.TOWN.lat,   TERMINALS.TOWN.lng)   < TERMINAL_RADIUS_METERS;
+            const nearTierra = haversineMeters(jeep.latitude, jeep.longitude, TERMINALS.TIERRA.lat, TERMINALS.TIERRA.lng) < TERMINAL_RADIUS_METERS;
+            const terminalLabel = nearTown ? TERMINALS.TOWN.label : nearTierra ? TERMINALS.TIERRA.label : null;
+            if (terminalLabel) {
+              const msg = `A jeep has departed from ${terminalLabel} heading to ${jeep.destination}`;
+              sendPushNotification('🚌 Jeep Departed!', msg);
+              showDepartureBanner(msg, terminalLabel);
+            }
+            departedJeepsRef.current.add(jeep.id);
+          }
+        });
+        // Clean up departed IDs that are no longer in Firebase
+        const activeIds = new Set(jeepsArray.map((j: any) => j.id));
+        departedJeepsRef.current.forEach(id => {
+          if (!activeIds.has(id)) departedJeepsRef.current.delete(id);
+        });
+      }
+    }, (error) => {
+      console.log('Firebase listener error:', error);
+    });
+
+    return () => unsubscribe();
+  }, [webViewLoaded]);
+
 
   const mapHtml = `
     <!DOCTYPE html>
@@ -242,31 +430,52 @@ export default function MapScreen() {
       <style>
         body { margin: 0; padding: 0; }
         #map { height: 100vh; width: 100vw; background: #f8f9fa; }
-        .user-dot { 
-          width: 20px; height: 20px; 
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          border: 4px solid white; border-radius: 50%; 
-          box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5), 0 0 0 8px rgba(102, 126, 234, 0.15);
-          animation: pulse 2s infinite;
+
+        /* ── Passenger / guest: blue pulsing dot ── */
+        .passenger-dot {
+          width: 18px; height: 18px;
+          background: #3b82f6;
+          border: 3px solid white; border-radius: 50%;
+          box-shadow: 0 2px 8px rgba(59,130,246,0.5), 0 0 0 6px rgba(59,130,246,0.15);
+          animation: passengerPulse 2s infinite;
         }
-        @keyframes pulse {
-          0%, 100% { box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5), 0 0 0 8px rgba(102, 126, 234, 0.15); }
-          50% { box-shadow: 0 4px 12px rgba(102, 126, 234, 0.7), 0 0 0 12px rgba(102, 126, 234, 0.25); }
+        @keyframes passengerPulse {
+          0%,100% { box-shadow: 0 2px 8px rgba(59,130,246,0.5), 0 0 0 6px rgba(59,130,246,0.15); }
+          50%      { box-shadow: 0 2px 8px rgba(59,130,246,0.7), 0 0 0 10px rgba(59,130,246,0.25); }
         }
-        .jeep-marker { 
-          width: 36px; height: 36px; 
-          background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-          border: 3px solid white; border-radius: 50%; 
-          text-align: center; line-height: 30px; font-size: 18px; 
-          box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
-          transition: all 0.3s ease;
+
+        /* ── Driver: green pill badge with steering wheel icon ── */
+        .driver-marker-wrap {
+          display: flex; align-items: center; justify-content: center;
+          width: 44px; height: 44px;
+          background: linear-gradient(135deg, #15803d 0%, #16a34a 100%);
+          border: 3px solid white; border-radius: 50%;
+          box-shadow: 0 4px 14px rgba(21,128,61,0.55), 0 0 0 5px rgba(21,128,61,0.18);
+          animation: driverPulse 2.5s infinite;
+        }
+        @keyframes driverPulse {
+          0%,100% { box-shadow: 0 4px 14px rgba(21,128,61,0.55), 0 0 0 5px rgba(21,128,61,0.18); }
+          50%      { box-shadow: 0 4px 14px rgba(21,128,61,0.75), 0 0 0 9px rgba(21,128,61,0.28); }
+        }
+        .driver-marker-wrap svg { display: block; }
+
+        /* ── Jeep markers on the map (other drivers seen by passengers) ── */
+        .jeep-marker {
+          display: flex; align-items: center; justify-content: center;
+          width: 42px; height: 42px;
+          background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+          border: 3px solid white; border-radius: 12px;
+          box-shadow: 0 4px 12px rgba(245,158,11,0.45);
+          font-size: 20px; line-height: 1;
           cursor: pointer;
+          transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
-        .jeep-marker:hover { transform: scale(1.1); }
-        .jeep-full { 
+        .jeep-marker:hover { transform: scale(1.12); box-shadow: 0 6px 18px rgba(245,158,11,0.55); }
+        .jeep-full {
           background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
-          box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4) !important;
+          box-shadow: 0 4px 12px rgba(239,68,68,0.45) !important;
         }
+        .jeep-full:hover { box-shadow: 0 6px 18px rgba(239,68,68,0.55) !important; }
       </style>
     </head>
     <body>
@@ -512,14 +721,49 @@ export default function MapScreen() {
             console.log('Received:', m.type);
 
             if (m.type === "SET_LOCATION") {
+              var prevDriverMode = isDriverMode;
               isDriverMode = m.isDriver;
               hasActiveRoute = m.hasActiveRoute || false;
 
+              // SVG steering-wheel icon used for the driver marker
+              var driverIconHtml = '<div class="driver-marker-wrap">'
+                + '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">'
+                + '<circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/>'
+                + '<circle cx="12" cy="12" r="3" fill="white"/>'
+                + '<line x1="12" y1="2" x2="12" y2="9" stroke="white" stroke-width="2" stroke-linecap="round"/>'
+                + '<line x1="4.22" y1="16" x2="10.27" y2="13.5" stroke="white" stroke-width="2" stroke-linecap="round"/>'
+                + '<line x1="19.78" y1="16" x2="13.73" y2="13.5" stroke="white" stroke-width="2" stroke-linecap="round"/>'
+                + '</svg></div>';
+
+              var passengerIconHtml = '<div class="passenger-dot"></div>';
+
+              // Build the correct icon for the current role
+              function makeUserIcon() {
+                if (isDriverMode) {
+                  return L.divIcon({
+                    className: '',
+                    html: driverIconHtml,
+                    iconSize: [44, 44],
+                    iconAnchor: [22, 22],
+                  });
+                } else {
+                  return L.divIcon({
+                    className: '',
+                    html: passengerIconHtml,
+                    iconSize: [18, 18],
+                    iconAnchor: [9, 9],
+                  });
+                }
+              }
+
               if (!userMarker) {
-                var icon = L.divIcon({ className: 'user-dot', iconSize: [20, 20] });
-                userMarker = L.marker([m.lat, m.lng], { icon: icon }).addTo(map);
+                userMarker = L.marker([m.lat, m.lng], { icon: makeUserIcon() }).addTo(map);
                 map.panTo([m.lat, m.lng]);
               } else {
+                // Swap icon if role changed (e.g. driver ends trip and becomes passenger)
+                if (prevDriverMode !== isDriverMode) {
+                  userMarker.setIcon(makeUserIcon());
+                }
                 userMarker.setLatLng([m.lat, m.lng]);
                 if (isDriverMode && hasActiveRoute) {
                   map.panTo([m.lat, m.lng], { animate: true, duration: 0.5 });
@@ -574,17 +818,28 @@ export default function MapScreen() {
                 var isFull = (j.status === 'full');
                 if (jeepMarkers[j.id]) {
                   jeepMarkers[j.id].setLatLng([j.latitude, j.longitude]);
-                  var el = jeepMarkers[j.id].getElement();
-                  if (el) {
-                    if (isFull) el.classList.add('jeep-full');
-                    else el.classList.remove('jeep-full');
-                  }
+                  // Refresh icon so full/available color updates correctly
+                  var updatedClass = 'jeep-marker' + (isFull ? ' jeep-full' : '');
+                  jeepMarkers[j.id].setIcon(L.divIcon({ className: '', html: '<div class="' + updatedClass + '">🚌</div>', iconSize: [42, 42], iconAnchor: [21, 21] }));
                 } else {
                   var cssClass = 'jeep-marker' + (isFull ? ' jeep-full' : '');
-                  var icon = L.divIcon({ className: cssClass, iconSize: [36, 36], html: '🚕' });
+                  var icon = L.divIcon({ className: '', html: '<div class="' + cssClass + '">🚌</div>', iconSize: [42, 42], iconAnchor: [21, 21] });
                   var marker = L.marker([j.latitude, j.longitude], { icon: icon }).addTo(map);
                   marker.jeepId = j.id;
-                  marker.on('click', function() { showJeepRoute(this.jeepId); });
+                  marker.on('click', function() {
+                    var jd = jeepsData[this.jeepId];
+                    // Draw the route on map (existing behaviour)
+                    showJeepRoute(this.jeepId);
+                    // Also send tap event to React Native so it shows the driver info sheet
+                    if (window.ReactNativeWebView) {
+                      window.ReactNativeWebView.postMessage(JSON.stringify({
+                        type: 'JEEP_TAPPED',
+                        jeepId: this.jeepId,
+                        destination: jd ? jd.destination : null,
+                        status: jd ? jd.status : 'available',
+                      }));
+                    }
+                  });
                   jeepMarkers[j.id] = marker;
                 }
               });
@@ -628,13 +883,37 @@ export default function MapScreen() {
           try {
             const message = JSON.parse(event.nativeEvent.data);
             console.log('Message from WebView:', message.type);
-            
+
             if (message.type === 'MAP_READY') {
               setWebViewLoaded(true);
             }
-            
+
             if (message.type === 'SHOW_FARE_MODAL') {
               setFareModalVisible(true);
+            }
+
+            // Passenger tapped a jeep marker — fetch driver profile from Firebase
+            if (message.type === 'JEEP_TAPPED') {
+              const { jeepId, destination, status } = message;
+              // Driver profile lives in jeep_info/{uid} — same path used by JeepInfoScreen
+              get(ref(db, `jeep_info/${jeepId}`)).then(snap => {
+                const jeepData = snap.exists() ? snap.val() : {};
+                openJeepInfoSheet({
+                  driverName: jeepData.driverName || 'Unknown Driver',
+                  plateNumber: jeepData.plate || 'Not set',
+                  profilePic: jeepData.profilePic || null,
+                  status: status || 'available',
+                  destination: destination || null,
+                });
+              }).catch(() => {
+                openJeepInfoSheet({
+                  driverName: 'Unknown Driver',
+                  plateNumber: 'Not set',
+                  profilePic: null,
+                  status: status || 'available',
+                  destination: destination || null,
+                });
+              });
             }
           } catch (e) {
             console.error('Message parse error:', e);
@@ -707,6 +986,149 @@ export default function MapScreen() {
           )}
         </View>
       )}
+
+      {/* ── DEPARTURE BANNER ───────────────────────────────────────────────── */}
+      {departureBanner.visible && (
+        <Animated.View style={[styles.departureBanner, { transform: [{ translateY: bannerAnim }] }]}>
+          <View style={styles.departureBannerIcon}>
+            <Text style={{ fontSize: 20 }}>🚌</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.departureBannerTitle}>Jeep Departed!</Text>
+            <Text style={styles.departureBannerMsg} numberOfLines={2}>{departureBanner.message}</Text>
+          </View>
+          <TouchableOpacity onPress={() => setDepartureBanner(p => ({ ...p, visible: false }))}>
+            <X color="#fff" size={18} />
+          </TouchableOpacity>
+        </Animated.View>
+      )}
+
+      {/* ── DRIVER INFO BOTTOM SHEET (passenger taps a jeep) ──────────────── */}
+      {jeepInfoVisible && (
+        <View style={styles.sheetOverlay}>
+          <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeJeepInfoSheet} />
+          <Animated.View style={[styles.jeepInfoSheet, { transform: [{ translateY: jeepSheetAnim }] }]}>
+            <View style={styles.sheetHandle} />
+
+            {/* Driver avatar + name header */}
+            <View style={styles.sheetDriverHeader}>
+              {selectedJeepInfo?.profilePic ? (
+                <Image
+                  source={{ uri: selectedJeepInfo.profilePic }}
+                  style={styles.sheetDriverAvatar}
+                />
+              ) : (
+                <View style={styles.sheetDriverAvatarFallback}>
+                  <User color="#6B7280" size={28} />
+                </View>
+              )}
+              <View style={{ marginLeft: 14 }}>
+                <Text style={styles.sheetTitle}>{selectedJeepInfo?.driverName ?? 'Jeep Info'}</Text>
+                <Text style={styles.sheetDriverPlate}>{selectedJeepInfo?.plateNumber ?? ''}</Text>
+              </View>
+            </View>
+
+            {/* Destination */}
+            <View style={styles.sheetRow}>
+              <View style={[styles.sheetIconBox, { backgroundColor: '#DBEAFE' }]}>
+                <MapPin color="#3B82F6" size={20} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetRowLabel}>Heading To</Text>
+                <Text style={styles.sheetRowValue}>
+                  {selectedJeepInfo?.destination
+                    ? (selectedJeepInfo.destination === 'Town' ? 'Town' : 'Balacbac')
+                    : 'Not started'}
+                </Text>
+              </View>
+            </View>
+
+            {/* Status */}
+            <View style={styles.sheetRow}>
+              <View style={[styles.sheetIconBox, {
+                backgroundColor: selectedJeepInfo?.status === 'full' ? '#FEE2E2' : '#D1FAE5'
+              }]}>
+                <Circle
+                  size={20}
+                  color={selectedJeepInfo?.status === 'full' ? '#EF4444' : '#10B981'}
+                  fill={selectedJeepInfo?.status === 'full' ? '#EF4444' : '#10B981'}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetRowLabel}>Status</Text>
+                <Text style={[styles.sheetRowValue, {
+                  color: selectedJeepInfo?.status === 'full' ? '#EF4444' : '#10B981'
+                }]}>
+                  {selectedJeepInfo?.status === 'full' ? 'Full' : 'Available'}
+                </Text>
+              </View>
+            </View>
+
+            {/* Route */}
+            <View style={styles.sheetRow}>
+              <View style={[styles.sheetIconBox, { backgroundColor: '#F3F4F6' }]}>
+                <Truck color="#6B7280" size={20} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetRowLabel}>Route</Text>
+                <Text style={styles.sheetRowValue}>Balacbac – Town</Text>
+              </View>
+            </View>
+
+            <TouchableOpacity style={styles.sheetCloseBtn} onPress={closeJeepInfoSheet}>
+              <Text style={styles.sheetCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </View>
+      )}
+
+      {/* ── DRIVER PROFILE SETUP MODAL (first time starting a trip) ──────── */}
+      <Modal visible={profileModalVisible} transparent animationType="slide">
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
+          <View style={styles.modalContent}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Set Up Your Profile</Text>
+            <Text style={styles.profileSubtitle}>
+              Passengers will see this info when they tap your jeep.
+            </Text>
+
+            <Text style={styles.inputLabel}>Your Name</Text>
+            <TextInput
+              style={styles.textInput}
+              placeholder="e.g. Juan dela Cruz"
+              value={driverName}
+              onChangeText={setDriverName}
+              autoCapitalize="words"
+              placeholderTextColor="#9CA3AF"
+            />
+
+            <Text style={styles.inputLabel}>Plate Number</Text>
+            <TextInput
+              style={styles.textInput}
+              placeholder="e.g. ABC 1234"
+              value={plateNumber}
+              onChangeText={setPlateNumber}
+              autoCapitalize="characters"
+              placeholderTextColor="#9CA3AF"
+            />
+
+            <TouchableOpacity style={styles.saveProfileBtn} onPress={saveProfileAndStart}>
+              <Text style={styles.saveProfileBtnText}>Save & Start Trip</Text>
+              <ChevronRight color="white" size={20} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.cancelBtn}
+              onPress={() => { setProfileModalVisible(false); setPendingDestination(null); }}
+            >
+              <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       {/* DESTINATION MODAL */}
       <Modal visible={routeModalVisible} transparent animationType="slide">
@@ -809,4 +1231,86 @@ const styles = StyleSheet.create({
   destinationTitle: { fontSize: 16, fontWeight: '700' },
   cancelBtn: { marginTop: 12, paddingVertical: 16, alignItems: 'center' },
   cancelText: { color: '#6B7280', fontSize: 16, fontWeight: '600' },
+
+  // ── Departure banner ─────────────────────────────────────────────────────
+  departureBanner: {
+    position: 'absolute', top: 0, left: 0, right: 0,
+    backgroundColor: '#15803d',
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingHorizontal: 16, paddingVertical: 14,
+    paddingTop: Platform.OS === 'ios' ? 52 : 14,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2, shadowRadius: 8, elevation: 10,
+    zIndex: 999,
+  },
+  departureBannerIcon: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  departureBannerTitle: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  departureBannerMsg: { color: 'rgba(255,255,255,0.9)', fontSize: 12, marginTop: 2 },
+
+  // ── Jeep info bottom sheet ───────────────────────────────────────────────
+  sheetOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end', zIndex: 100,
+  },
+  jeepInfoSheet: {
+    backgroundColor: 'white', borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    padding: 24, paddingBottom: 40,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.12, shadowRadius: 16, elevation: 20,
+  },
+  sheetHandle: {
+    width: 40, height: 5, backgroundColor: '#E5E7EB',
+    borderRadius: 3, alignSelf: 'center', marginBottom: 20,
+  },
+  sheetTitle: { fontSize: 20, fontWeight: '800', color: '#111827' },
+  sheetRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#F3F4F6',
+  },
+  sheetIconBox: {
+    width: 44, height: 44, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sheetRowLabel: { fontSize: 11, color: '#9CA3AF', fontWeight: '600', textTransform: 'uppercase', marginBottom: 2 },
+  sheetRowValue: { fontSize: 16, fontWeight: '700', color: '#1F2937' },
+  sheetDriverHeader: {
+    flexDirection: 'row', alignItems: 'center', marginBottom: 20,
+  },
+  sheetDriverAvatar: {
+    width: 60, height: 60, borderRadius: 30,
+    borderWidth: 2, borderColor: '#E5E7EB',
+  },
+  sheetDriverAvatarFallback: {
+    width: 60, height: 60, borderRadius: 30,
+    backgroundColor: '#F3F4F6',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: '#E5E7EB',
+  },
+  sheetDriverPlate: {
+    fontSize: 13, color: '#6B7280', fontWeight: '600',
+    marginTop: 2,
+  },
+  sheetCloseBtn: {
+    marginTop: 20, backgroundColor: '#F3F4F6', borderRadius: 14,
+    paddingVertical: 16, alignItems: 'center',
+  },
+  sheetCloseBtnText: { color: '#374151', fontWeight: '700', fontSize: 15 },
+
+  // ── Driver profile setup ─────────────────────────────────────────────────
+  profileSubtitle: { color: '#6B7280', fontSize: 14, marginBottom: 24, marginTop: -8 },
+  inputLabel: { fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 6 },
+  textInput: {
+    backgroundColor: '#F9FAFB', borderWidth: 1.5, borderColor: '#E5E7EB',
+    borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14,
+    fontSize: 16, color: '#111827', marginBottom: 16,
+  },
+  saveProfileBtn: {
+    backgroundColor: '#15803d', borderRadius: 14, paddingVertical: 16,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 4,
+  },
+  saveProfileBtnText: { color: 'white', fontWeight: '700', fontSize: 16 },
 });
