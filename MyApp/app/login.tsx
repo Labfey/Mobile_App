@@ -2,8 +2,8 @@ import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, Styl
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import React, { useState } from "react";
-import { ArrowRight, Lock, Mail, MapPin } from "lucide-react-native"; 
-import { auth, signInWithEmailAndPassword, db, ref, get, signOut } from "../services/firebase"; 
+import { ArrowRight, Lock, Mail, MapPin } from "lucide-react-native";
+import { auth, signInWithEmailAndPassword, db, ref, get, signOut } from "../services/firebase";
 
 export default function LoginScreen() {
     const router = useRouter();
@@ -22,11 +22,21 @@ export default function LoginScreen() {
             const user = userCredential.user;
             const snapshot = await get(ref(db, `users/${user.uid}`));
 
-            if (snapshot.exists() && snapshot.val().role === 'driver') {
-                router.replace("/(tabs)");
+            if (snapshot.exists()) {
+                const role = snapshot.val().role;
+
+                if (role === 'driver') {
+                    router.replace("/(tabs)" as any);
+                } else if (role === 'admin') {
+                    router.replace("/(admin)" as any);
+                } else {
+                    await signOut(auth);
+                    Alert.alert("Access Denied", "Only drivers and admins can log in. Commuters please use the button below.");
+                    setLoading(false);
+                }
             } else {
-                await signOut(auth); 
-                Alert.alert("Access Denied", "Only drivers can log in. Commuters please use the button below.");
+                await signOut(auth);
+                Alert.alert("Access Denied", "No account data found.");
                 setLoading(false);
             }
         } catch (error) {
@@ -46,8 +56,8 @@ export default function LoginScreen() {
             {/* --- BIG COMMUTER CHOICE --- */}
             <View style={s.commuterSection}>
                 <Text style={s.sectionLabel}>COMMUTERS</Text>
-                <TouchableOpacity 
-                    onPress={() => router.replace("/(tabs)")} 
+                <TouchableOpacity
+                    onPress={() => router.replace("/(tabs)" as any)}
                     style={s.guestButton}
                     activeOpacity={0.7}
                 >
@@ -66,18 +76,18 @@ export default function LoginScreen() {
 
             <View style={s.dividerContainer}>
                 <View style={s.divider} />
-                <Text style={s.dividerText}>DRIVERS</Text>
+                <Text style={s.dividerText}>DRIVERS / ADMIN</Text>
                 <View style={s.divider} />
             </View>
 
-            {/* --- DRIVER LOGIN --- */}
+            {/* --- DRIVER / ADMIN LOGIN --- */}
             <View style={s.form}>
                 <View style={s.inputGroup}>
                     <View style={s.inputContainer}>
                         <Mail color="#6b7280" size={18} />
                         <TextInput
                             style={s.input}
-                            placeholder="Driver Email"
+                            placeholder="Email"
                             value={email}
                             onChangeText={setEmail}
                             autoCapitalize="none"
@@ -100,15 +110,15 @@ export default function LoginScreen() {
                     </View>
                 </View>
 
-                <TouchableOpacity 
-                    onPress={handleLogin} 
-                    style={s.loginButton} 
+                <TouchableOpacity
+                    onPress={handleLogin}
+                    style={s.loginButton}
                     disabled={loading}
                 >
                     {loading ? (
                         <ActivityIndicator color="white" />
                     ) : (
-                        <Text style={s.loginButtonText}>Driver Log In</Text>
+                        <Text style={s.loginButtonText}>Log In</Text>
                     )}
                 </TouchableOpacity>
             </View>
@@ -124,17 +134,14 @@ const s = StyleSheet.create({
 
     commuterSection: { marginBottom: 10 },
     sectionLabel: { fontSize: 12, fontWeight: '800', color: '#9ca3af', marginBottom: 10, textAlign: 'center' },
-    guestButton: { 
-        backgroundColor: '#f0fdf4', 
-        borderRadius: 24, 
-        borderWidth: 2, 
+    guestButton: {
+        backgroundColor: '#f0fdf4',
+        borderRadius: 24,
+        borderWidth: 2,
         borderColor: '#15803d',
         padding: 16
     },
-    guestBtnContent: {
-        flexDirection: 'row', 
-        alignItems: 'center',
-    },
+    guestBtnContent: { flexDirection: 'row', alignItems: 'center' },
     iconCircle: { backgroundColor: '#15803d', padding: 10, borderRadius: 12, marginRight: 15 },
     guestTextContainer: { flex: 1 },
     guestTextMain: { color: '#15803d', fontSize: 20, fontWeight: '800' },
@@ -146,24 +153,24 @@ const s = StyleSheet.create({
 
     form: { width: '100%' },
     inputGroup: { marginBottom: 12 },
-    inputContainer: { 
-        flexDirection: 'row', 
-        alignItems: 'center', 
-        backgroundColor: '#f9fafb', 
-        borderRadius: 12, 
-        paddingHorizontal: 16, 
-        height: 54, 
-        borderWidth: 1, 
-        borderColor: '#e5e7eb' 
+    inputContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#f9fafb',
+        borderRadius: 12,
+        paddingHorizontal: 16,
+        height: 54,
+        borderWidth: 1,
+        borderColor: '#e5e7eb'
     },
     input: { flex: 1, marginLeft: 10, fontSize: 16, color: '#111827' },
-    loginButton: { 
-        backgroundColor: '#15803d', 
-        height: 54, 
-        borderRadius: 12, 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        marginTop: 10 
+    loginButton: {
+        backgroundColor: '#15803d',
+        height: 54,
+        borderRadius: 12,
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginTop: 10
     },
     loginButtonText: { color: 'white', fontSize: 16, fontWeight: '700' },
 });
