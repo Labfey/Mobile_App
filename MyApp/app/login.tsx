@@ -2,7 +2,7 @@ import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, Styl
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import React, { useState } from "react";
-import { ArrowRight, Lock, Mail, MapPin } from "lucide-react-native";
+import { ArrowRight, Lock, Mail, MapPin, UserPlus } from "lucide-react-native";
 import { auth, signInWithEmailAndPassword, db, ref, get, signOut } from "../services/firebase";
 
 export default function LoginScreen() {
@@ -25,13 +25,32 @@ export default function LoginScreen() {
             if (snapshot.exists()) {
                 const role = snapshot.val().role;
 
-                if (role === 'driver') {
+                if (role === "driver") {
                     router.replace("/(tabs)" as any);
-                } else if (role === 'admin') {
+                } else if (role === "admin") {
                     router.replace("/(admin)" as any);
+                } else if (role === "pending_driver") {
+                    await signOut(auth);
+                    Alert.alert(
+                        "Application Pending ⏳",
+                        "Your driver application is still under review. Please check back once an admin has approved your account.",
+                        [{ text: "OK" }]
+                    );
+                    setLoading(false);
+                } else if (role === "rejected_driver") {
+                    await signOut(auth);
+                    Alert.alert(
+                        "Application Rejected",
+                        "Unfortunately, your driver application was not approved. Please contact the admin for more details.",
+                        [{ text: "OK" }]
+                    );
+                    setLoading(false);
                 } else {
                     await signOut(auth);
-                    Alert.alert("Access Denied", "Only drivers and admins can log in. Commuters please use the button below.");
+                    Alert.alert(
+                        "Access Denied",
+                        "Only drivers and admins can log in. Commuters, please use the button below."
+                    );
                     setLoading(false);
                 }
             } else {
@@ -53,7 +72,7 @@ export default function LoginScreen() {
                 <Text style={s.subtitle}>Balacbac Transit System</Text>
             </View>
 
-            {/* --- BIG COMMUTER CHOICE --- */}
+            {/* ── COMMUTER / GUEST ── */}
             <View style={s.commuterSection}>
                 <Text style={s.sectionLabel}>COMMUTERS</Text>
                 <TouchableOpacity
@@ -80,7 +99,7 @@ export default function LoginScreen() {
                 <View style={s.divider} />
             </View>
 
-            {/* --- DRIVER / ADMIN LOGIN --- */}
+            {/* ── DRIVER / ADMIN LOGIN ── */}
             <View style={s.form}>
                 <View style={s.inputGroup}>
                     <View style={s.inputContainer}>
@@ -121,56 +140,76 @@ export default function LoginScreen() {
                         <Text style={s.loginButtonText}>Log In</Text>
                     )}
                 </TouchableOpacity>
+
+                {/* ── REGISTER AS DRIVER ── */}
+                <View style={s.registerDivider}>
+                    <View style={s.thinDivider} />
+                    <Text style={s.registerDividerText}>New driver?</Text>
+                    <View style={s.thinDivider} />
+                </View>
+
+                <TouchableOpacity
+                    onPress={() => router.push("/registration" as any)}
+                    style={s.registerButton}
+                    activeOpacity={0.8}
+                >
+                    <UserPlus color="#15803d" size={18} />
+                    <Text style={s.registerButtonText}>Apply as a Driver</Text>
+                    <ArrowRight color="#15803d" size={16} />
+                </TouchableOpacity>
+
+                <Text style={s.registerHint}>
+                    Submit your license &amp; ID for admin verification
+                </Text>
             </View>
         </SafeAreaView>
     );
 }
 
 const s = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#ffffff', padding: 24, justifyContent: 'center' },
-    header: { marginBottom: 40, alignItems: 'center' },
-    title: { fontSize: 42, fontWeight: '900', color: '#15803d' },
-    subtitle: { fontSize: 16, color: '#6b7280' },
+    container: { flex: 1, backgroundColor: "#ffffff", padding: 24, justifyContent: "center" },
+    header: { marginBottom: 36, alignItems: "center" },
+    title: { fontSize: 42, fontWeight: "900", color: "#15803d" },
+    subtitle: { fontSize: 16, color: "#6b7280" },
 
     commuterSection: { marginBottom: 10 },
-    sectionLabel: { fontSize: 12, fontWeight: '800', color: '#9ca3af', marginBottom: 10, textAlign: 'center' },
+    sectionLabel: { fontSize: 12, fontWeight: "800", color: "#9ca3af", marginBottom: 10, textAlign: "center" },
     guestButton: {
-        backgroundColor: '#f0fdf4',
-        borderRadius: 24,
-        borderWidth: 2,
-        borderColor: '#15803d',
-        padding: 16
+        backgroundColor: "#f0fdf4", borderRadius: 24, borderWidth: 2, borderColor: "#15803d", padding: 16,
     },
-    guestBtnContent: { flexDirection: 'row', alignItems: 'center' },
-    iconCircle: { backgroundColor: '#15803d', padding: 10, borderRadius: 12, marginRight: 15 },
+    guestBtnContent: { flexDirection: "row", alignItems: "center" },
+    iconCircle: { backgroundColor: "#15803d", padding: 10, borderRadius: 12, marginRight: 15 },
     guestTextContainer: { flex: 1 },
-    guestTextMain: { color: '#15803d', fontSize: 20, fontWeight: '800' },
-    guestTextSub: { color: '#166534', fontSize: 13, opacity: 0.7 },
+    guestTextMain: { color: "#15803d", fontSize: 20, fontWeight: "800" },
+    guestTextSub: { color: "#166534", fontSize: 13, opacity: 0.7 },
 
-    dividerContainer: { flexDirection: 'row', alignItems: 'center', marginVertical: 30 },
-    divider: { flex: 1, height: 1, backgroundColor: '#e5e7eb' },
-    dividerText: { marginHorizontal: 15, color: '#9ca3af', fontWeight: '700', fontSize: 11 },
+    dividerContainer: { flexDirection: "row", alignItems: "center", marginVertical: 26 },
+    divider: { flex: 1, height: 1, backgroundColor: "#e5e7eb" },
+    dividerText: { marginHorizontal: 15, color: "#9ca3af", fontWeight: "700", fontSize: 11 },
 
-    form: { width: '100%' },
+    form: { width: "100%" },
     inputGroup: { marginBottom: 12 },
     inputContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#f9fafb',
-        borderRadius: 12,
-        paddingHorizontal: 16,
-        height: 54,
-        borderWidth: 1,
-        borderColor: '#e5e7eb'
+        flexDirection: "row", alignItems: "center", backgroundColor: "#f9fafb",
+        borderRadius: 12, paddingHorizontal: 16, height: 54,
+        borderWidth: 1, borderColor: "#e5e7eb",
     },
-    input: { flex: 1, marginLeft: 10, fontSize: 16, color: '#111827' },
+    input: { flex: 1, marginLeft: 10, fontSize: 16, color: "#111827" },
     loginButton: {
-        backgroundColor: '#15803d',
-        height: 54,
-        borderRadius: 12,
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginTop: 10
+        backgroundColor: "#15803d", height: 54, borderRadius: 12,
+        justifyContent: "center", alignItems: "center", marginTop: 10,
     },
-    loginButtonText: { color: 'white', fontSize: 16, fontWeight: '700' },
+    loginButtonText: { color: "white", fontSize: 16, fontWeight: "700" },
+
+    registerDivider: { flexDirection: "row", alignItems: "center", marginVertical: 18, gap: 10 },
+    thinDivider: { flex: 1, height: 1, backgroundColor: "#f3f4f6" },
+    registerDividerText: { fontSize: 12, color: "#9ca3af", fontWeight: "600" },
+
+    registerButton: {
+        flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+        backgroundColor: "#f0fdf4", borderRadius: 14, height: 52,
+        borderWidth: 1.5, borderColor: "#bbf7d0",
+    },
+    registerButtonText: { color: "#15803d", fontSize: 15, fontWeight: "700" },
+    registerHint: { textAlign: "center", color: "#9ca3af", fontSize: 12, marginTop: 8 },
 });

@@ -14,12 +14,42 @@ import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { auth, db } from "../../services/firebase";
 import { ref, get, onValue, push, update, remove, serverTimestamp } from "firebase/database";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { FARE_CONTEXT } from "../../constants/fareInfo";
 
-// ─── Gemini client ────────────────────────────────────────────────────────────
-const genAI = new GoogleGenerativeAI(process.env.EXPO_PUBLIC_GEMINI_KEY ?? "");
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+// ─── Z.ai via OpenAI-compatible REST fetch ────────────────────────────────────
+// Z.ai uses the same /chat/completions format as OpenAI — simple and reliable
+// in Expo Go on physical devices, no SDK needed.
+const ZAI_API_URL = "https://api.z.ai/api/paas/v4/chat/completions";
+const ZAI_MODEL   = "glm-4.5-flash"; // fast + free tier; swap to "glm-4.5" for best quality
+
+async function callZAI(
+  messages: { role: string; content: string }[]
+): Promise<string> {
+  const key = process.env.EXPO_PUBLIC_ZAI_KEY;
+  if (!key) throw new Error("EXPO_PUBLIC_ZAI_KEY is not set in .env");
+
+  const response = await fetch(ZAI_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: ZAI_MODEL,
+      messages,
+      temperature: 0.4,
+      max_tokens: 400,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err?.error?.message ?? `HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content ?? "No response received.";
+}
 
 type Message = { id: string; role: "user" | "assistant"; text: string };
 
@@ -177,33 +207,45 @@ export default function HomeScreen() {
     return () => unsub();
   }, []);
 
-  // ── Gemini chat ───────────────────────────────────────────────────────────
-  const getOrCreateChat = () => {
-    if (!chatRef.current) {
-      chatRef.current = model.startChat({
-        history: [
-          { role: "user",  parts: [{ text: FARE_CONTEXT }] },
-          { role: "model", parts: [{ text: "Understood! I'm ready to answer fare and route questions for the Balacbac–Town jeepney route." }] },
-        ],
-      });
-    }
-    return chatRef.current;
-  };
-
+  // ── Z.ai chat ───────────────────────────────────────────────────────────
   const sendMessage = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || aiLoading) return;
     Keyboard.dismiss();
+
     const userMsg: Message = { id: Date.now().toString(), role: "user", text: trimmed };
     setMessages(prev => [...prev, userMsg]);
     setInputText("");
     setAiLoading(true);
+
     try {
-      const chat = getOrCreateChat();
-      const result = await chat.sendMessage(trimmed);
-      setMessages(prev => [...prev, { id: (Date.now()+1).toString(), role: "assistant", text: result.response.text() }]);
-    } catch {
-      setMessages(prev => [...prev, { id: (Date.now()+1).toString(), role: "assistant", text: "Sorry, I couldn't connect right now. Please try again." }]);
+      // Z.ai uses OpenAI-style flat messages: { role, content }
+      // Seed with fare context as a system message on the very first turn
+      const history: { role: string; content: string }[] = chatRef.current ?? [
+        { role: "system", content: FARE_CONTEXT },
+      ];
+
+      const updatedHistory = [...history, { role: "user", content: trimmed }];
+
+      const reply = await callZAI(updatedHistory);
+
+      // Persist for multi-turn memory
+      chatRef.current = [...updatedHistory, { role: "assistant", content: reply }];
+
+      setMessages(prev => [
+        ...prev,
+        { id: (Date.now() + 1).toString(), role: "assistant", text: reply },
+      ]);
+    } catch (err: any) {
+      console.error("Z.ai error:", err?.message ?? err);
+      setMessages(prev => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          text: `⚠️ ${err?.message ?? "Could not reach Z.ai. Check your API key and internet connection."}`,
+        },
+      ]);
     } finally {
       setAiLoading(false);
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);

@@ -5,7 +5,7 @@ import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import * as Notifications from "expo-notifications";
 import { Navigation as NavIcon, MapPin, Circle, XCircle, User, Truck, ChevronRight, X, Calculator, Hand } from "lucide-react-native";
-import { ref, onValue, update, get, remove } from "firebase/database";
+import { ref, onValue, update, get, remove, push } from "firebase/database"; // ← added push
 import { auth, db } from "../../services/firebase";
 import { FARE_ZONES } from "../../constants/routes";
 
@@ -26,7 +26,6 @@ const TERMINALS = {
 const TERMINAL_RADIUS_METERS = 80;
 const LOCATION_TASK_NAME = 'background-location-task';
 
-// ── Place-based fare calculation ─────────────────────────────────────────────
 const FARE_STOPS = ['Town', 'Shell', 'Junction', 'Centro', 'Friendship', 'Balacbac'];
 const STOP_ORDER: Record<string, number> = {
   'Town': 0, 'Shell': 1, 'Junction': 2, 'Centro': 3, 'Friendship': 4, 'Balacbac': 5,
@@ -71,6 +70,7 @@ export default function MapScreen() {
   const currentLocationRef = useRef<{ lat: number; lng: number } | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const [webViewLoaded, setWebViewLoaded] = useState(false);
+  const currentTripIdRef = useRef<string | null>(null);
 
   // ── Driver profile ───────────────────────────────────────────────────────
   const [profileModalVisible, setProfileModalVisible] = useState(false);
@@ -98,14 +98,16 @@ export default function MapScreen() {
   const [fareFrom, setFareFrom] = useState('');
   const [fareTo, setFareTo] = useState('');
 
-  // ── Passenger/Guest ride request (no account needed) ─────────────────────
+  // ── Passenger/Guest ride request ─────────────────────────────────────────
   const [rideRequestModalVisible, setRideRequestModalVisible] = useState(false);
   const [activeRideRequest, setActiveRideRequest] = useState<{
     destination: string; lat: number; lng: number;
   } | null>(null);
   const notifiedRequestsRef = useRef<Set<string>>(new Set());
-  // Anonymous ride request ID so guests can cancel their own request
   const guestRideIdRef = useRef<string | null>(null);
+
+  // ── History tracking ─────────────────────────────────────────────────────
+  const currentHistoryKeyRef = useRef<string | null>(null);
 
   // ── Notification permission ──────────────────────────────────────────────
   useEffect(() => {
@@ -143,7 +145,6 @@ export default function MapScreen() {
     }
   };
 
-  // ── Helpers ─────────────────────────────────────────────────────────────
   const haversineMeters = (lat1: number, lng1: number, lat2: number, lng2: number) => {
     const R = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -178,15 +179,12 @@ export default function MapScreen() {
       .start(() => setJeepInfoVisible(false));
   };
 
-  // ── Ride request helpers (works for guests AND logged-in passengers) ──────
   const submitRideRequest = async (destination: 'Town' | 'Balacbac') => {
     if (!currentLocationRef.current) {
       Alert.alert('Location unavailable', 'Please wait for your location to load.');
       return;
     }
     const { lat, lng } = currentLocationRef.current;
-
-    // Use uid if logged in, otherwise generate a stable anonymous id for this session
     let requestId: string;
     if (auth.currentUser) {
       requestId = auth.currentUser.uid;
@@ -196,14 +194,11 @@ export default function MapScreen() {
       }
       requestId = guestRideIdRef.current;
     }
-
     await update(ref(db, `ride_requests/${requestId}`), {
       lat, lng, destination, timestamp: Date.now(), status: 'waiting',
     });
     setActiveRideRequest({ destination, lat, lng });
-    postMessageToWebView({ type: 'SET_RIDE_REQUESTS', requests: {
-      [requestId]: { lat, lng, destination }
-    }});
+    postMessageToWebView({ type: 'SET_RIDE_REQUESTS', requests: { [requestId]: { lat, lng, destination } } });
     setRideRequestModalVisible(false);
     Alert.alert('Request Sent! 🙋', `Drivers heading to ${destination} can see your location.`);
   };
@@ -218,16 +213,24 @@ export default function MapScreen() {
     postMessageToWebView({ type: 'SET_RIDE_REQUESTS', requests: {} });
   };
 
-  // ── End trip without confirmation (used by auto end trip) ────────────────
-  const endTripSilent = async () => {
-    setCurrentDest(null);
-    postMessageToWebView({ type: "CLEAR_ZONES" });
-    const isTracking = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-    if (isTracking) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
-    if (auth.currentUser) await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
-  };
+const endTripSilent = async () => {
+  setCurrentDest(null);
+  postMessageToWebView({ type: "CLEAR_ZONES" });
+  const isTracking = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+  if (isTracking) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+  if (auth.currentUser) {
+    await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
+    // Log trip end
+    if (currentTripIdRef.current) {
+      update(
+        ref(db, `driver_trips/${auth.currentUser.uid}/${currentTripIdRef.current}`),
+        { endTime: Date.now() }
+      ).catch(() => {});
+      currentTripIdRef.current = null;
+    }
+  }
+};
 
-  // ── Trip control ─────────────────────────────────────────────────────────
   const startTrip = async (destination: 'Town' | 'Balacbac') => {
     if (auth.currentUser) {
       const snap = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
@@ -279,11 +282,34 @@ export default function MapScreen() {
         showDepartureBanner(msg, terminalLabel);
       }
     }
-    if (auth.currentUser) {
-      update(ref(db, `jeeps/${auth.currentUser.uid}`), {
-        destination, status: isFull ? 'full' : 'available',
-      });
-    }
+if (auth.currentUser) {
+  update(ref(db, `jeeps/${auth.currentUser.uid}`), {
+    destination, status: isFull ? 'full' : 'available',
+  });
+  // Log trip start
+  const tripRef = push(ref(db, `driver_trips/${auth.currentUser.uid}`));
+  currentTripIdRef.current = tripRef.key;
+  update(tripRef, {
+    destination,
+    startTime: Date.now(),
+    date: new Date().toISOString().split('T')[0],
+    endTime: null,
+  }).catch(() => {});
+
+  // ── Save history entry on trip start ─────────────────────────────────
+  const now = new Date();
+  const dateKey = now.toISOString().split('T')[0];
+  const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  const historyRef = push(ref(db, `history/${auth.currentUser.uid}/${dateKey}`));
+  currentHistoryKeyRef.current = historyRef.key;
+  await update(historyRef, {
+    route: `To ${destination}`,
+    startTime: timeStr,
+    endTime: timeStr,
+    distance: 0,
+    timestamp: Date.now(),
+  });
+}
   };
 
   const saveProfileAndStart = async () => {
@@ -302,7 +328,25 @@ export default function MapScreen() {
   const endTrip = () => {
     Alert.alert("End Trip", "Are you sure you want to end the current trip?", [
       { text: "Cancel", style: "cancel" },
-      { text: "End Trip", style: "destructive", onPress: endTripSilent }
+      { text: "End Trip", style: "destructive", onPress: async () => {
+        setCurrentDest(null);
+        postMessageToWebView({ type: "CLEAR_ZONES" });
+        const isTracking = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+        if (isTracking) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+        if (auth.currentUser) {
+          await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
+          if (currentHistoryKeyRef.current) {
+            const now = new Date();
+            const dateKey = now.toISOString().split('T')[0];
+            const endTimeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+            await update(
+              ref(db, `history/${auth.currentUser.uid}/${dateKey}/${currentHistoryKeyRef.current}`),
+              { endTime: endTimeStr }
+            );
+            currentHistoryKeyRef.current = null;
+          }
+        }
+      }}
     ]);
   };
 
@@ -314,7 +358,6 @@ export default function MapScreen() {
     postMessageToWebView({ type: "SET_DRIVER_STATUS", isFull: newStatus });
   };
 
-  // ── Stable refs ──────────────────────────────────────────────────────────
   const roleRef = useRef(role);
   const currentDestRef = useRef(currentDest);
   const webViewLoadedRef = useRef(webViewLoaded);
@@ -324,7 +367,6 @@ export default function MapScreen() {
   useEffect(() => { webViewLoadedRef.current = webViewLoaded; }, [webViewLoaded]);
   useEffect(() => { isFullRef.current = isFull; }, [isFull]);
 
-  // ── Location watch (once) ────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -354,7 +396,6 @@ export default function MapScreen() {
     return () => { if (locationSub.current) { locationSub.current.remove(); locationSub.current = null; } };
   }, []);
 
-  // ── Firebase jeeps listener ──────────────────────────────────────────────
   useEffect(() => {
     if (!webViewLoaded) return;
     const jeepsRef = ref(db, 'jeeps');
@@ -385,7 +426,6 @@ export default function MapScreen() {
     return () => unsubscribe();
   }, [webViewLoaded]);
 
-  // ── Firebase ride_requests listener (drivers only) ───────────────────────
   useEffect(() => {
     if (!webViewLoaded || role !== 'driver') return;
     const requestsRef = ref(db, 'ride_requests');
@@ -821,7 +861,6 @@ export default function MapScreen() {
             const message = JSON.parse(event.nativeEvent.data);
             if (message.type === 'MAP_READY') setWebViewLoaded(true);
             if (message.type === 'SHOW_FARE_MODAL') setFareModalVisible(true);
-
             if (message.type === 'JEEP_TAPPED') {
               const { jeepId, destination, status } = message;
               get(ref(db, `jeep_info/${jeepId}`)).then(snap => {
@@ -838,20 +877,13 @@ export default function MapScreen() {
                 profilePic: null, status: status || 'available', destination: destination || null,
               }));
             }
-
             if (message.type === 'ROUTE_COMPLETED') {
               Alert.alert(
                 '\uD83C\uDFC1 Route Complete!',
                 'You have reached the end of the route.',
                 [
                   { text: 'End Trip', style: 'destructive', onPress: endTripSilent },
-                  {
-                    text: 'Start New Trip',
-                    onPress: async () => {
-                      await endTripSilent();
-                      setTimeout(() => setRouteModalVisible(true), 400);
-                    },
-                  },
+                  { text: 'Start New Trip', onPress: async () => { await endTripSilent(); setTimeout(() => setRouteModalVisible(true), 400); } },
                 ],
                 { cancelable: false }
               );
@@ -865,18 +897,14 @@ export default function MapScreen() {
         })}
       />
 
-      {/* ── FARE CALCULATOR BUTTON (non-drivers only) ─────────────────────── */}
+      {/* FARE CALCULATOR BUTTON (non-drivers only) */}
       {role !== 'driver' && (
-        <TouchableOpacity
-          style={styles.fareCalcFab}
-          onPress={() => setFareCalcVisible(true)}
-          activeOpacity={0.85}
-        >
+        <TouchableOpacity style={styles.fareCalcFab} onPress={() => setFareCalcVisible(true)} activeOpacity={0.85}>
           <Calculator color="white" size={22} />
         </TouchableOpacity>
       )}
 
-      {/* ── PASSENGER / GUEST RIDE REQUEST PANEL ────────────────────────── */}
+      {/* PASSENGER / GUEST RIDE REQUEST PANEL */}
       {role !== 'driver' && (
         <View style={styles.passengerPanel}>
           {activeRideRequest ? (
@@ -894,11 +922,7 @@ export default function MapScreen() {
               </TouchableOpacity>
             </View>
           ) : (
-            <TouchableOpacity
-              style={styles.rideRequestBtn}
-              onPress={() => setRideRequestModalVisible(true)}
-              activeOpacity={0.85}
-            >
+            <TouchableOpacity style={styles.rideRequestBtn} onPress={() => setRideRequestModalVisible(true)} activeOpacity={0.85}>
               <Hand color="white" size={20} />
               <Text style={styles.rideRequestBtnText}>Request a Ride</Text>
             </TouchableOpacity>
@@ -906,7 +930,7 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── DRIVER PANEL ─────────────────────────────────────────────────── */}
+      {/* DRIVER PANEL */}
       {role === 'driver' && (
         <View style={styles.driverPanel}>
           {currentDest ? (
@@ -923,17 +947,11 @@ export default function MapScreen() {
                 </View>
               </View>
               <View style={styles.statusButtonsRow}>
-                <TouchableOpacity
-                  onPress={() => toggleStatus(false)}
-                  style={[styles.statusButton, styles.availableButton, !isFull && styles.statusButtonActive]}
-                >
+                <TouchableOpacity onPress={() => toggleStatus(false)} style={[styles.statusButton, styles.availableButton, !isFull && styles.statusButtonActive]}>
                   <Circle size={10} color={!isFull ? '#10B981' : '#9CA3AF'} fill={!isFull ? '#10B981' : '#9CA3AF'} />
                   <Text style={[styles.statusButtonText, !isFull && styles.statusButtonTextActive]}>Available</Text>
                 </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => toggleStatus(true)}
-                  style={[styles.statusButton, styles.fullButton, isFull && styles.statusButtonActive]}
-                >
+                <TouchableOpacity onPress={() => toggleStatus(true)} style={[styles.statusButton, styles.fullButton, isFull && styles.statusButtonActive]}>
                   <Circle size={10} color={isFull ? '#EF4444' : '#9CA3AF'} fill={isFull ? '#EF4444' : '#9CA3AF'} />
                   <Text style={[styles.statusButtonText, isFull && styles.statusButtonTextActive]}>Full</Text>
                 </TouchableOpacity>
@@ -946,23 +964,19 @@ export default function MapScreen() {
           ) : (
             <TouchableOpacity onPress={() => setRouteModalVisible(true)} style={styles.startTripCard}>
               <View style={styles.startTripContent}>
-                <View style={styles.startIconContainer}>
-                  <NavIcon color="white" size={24} />
-                </View>
+                <View style={styles.startIconContainer}><NavIcon color="white" size={24} /></View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.startTripTitle}>Start a Trip</Text>
                   <Text style={styles.startTripSubtitle}>Choose your destination</Text>
                 </View>
-                <View style={styles.arrowContainer}>
-                  <Text style={{ color: 'white', fontSize: 20 }}>→</Text>
-                </View>
+                <View style={styles.arrowContainer}><Text style={{ color: 'white', fontSize: 20 }}>→</Text></View>
               </View>
             </TouchableOpacity>
           )}
         </View>
       )}
 
-      {/* ── DEPARTURE BANNER ─────────────────────────────────────────────── */}
+      {/* DEPARTURE BANNER */}
       {departureBanner.visible && (
         <Animated.View style={[styles.departureBanner, { transform: [{ translateY: bannerAnim }] }]}>
           <View style={styles.departureBannerIcon}><Text style={{ fontSize: 20 }}>🚌</Text></View>
@@ -976,7 +990,7 @@ export default function MapScreen() {
         </Animated.View>
       )}
 
-      {/* ── JEEP INFO BOTTOM SHEET ───────────────────────────────────────── */}
+      {/* JEEP INFO BOTTOM SHEET */}
       {jeepInfoVisible && (
         <View style={styles.sheetOverlay}>
           <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeJeepInfoSheet} />
@@ -986,9 +1000,7 @@ export default function MapScreen() {
               {selectedJeepInfo?.profilePic ? (
                 <Image source={{ uri: selectedJeepInfo.profilePic }} style={styles.sheetDriverAvatar} />
               ) : (
-                <View style={styles.sheetDriverAvatarFallback}>
-                  <User color="#6B7280" size={28} />
-                </View>
+                <View style={styles.sheetDriverAvatarFallback}><User color="#6B7280" size={28} /></View>
               )}
               <View style={{ marginLeft: 14, flex: 1 }}>
                 <Text style={styles.sheetTitle}>{selectedJeepInfo?.driverName ?? 'Jeep Info'}</Text>
@@ -1030,7 +1042,7 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── DRIVER PROFILE SETUP MODAL ───────────────────────────────────── */}
+      {/* DRIVER PROFILE SETUP MODAL */}
       <Modal visible={profileModalVisible} transparent animationType="slide">
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -1038,17 +1050,9 @@ export default function MapScreen() {
             <Text style={styles.modalTitle}>Set Up Your Profile</Text>
             <Text style={styles.profileSubtitle}>Passengers will see this when they tap your jeep.</Text>
             <Text style={styles.inputLabel}>Your Name</Text>
-            <TextInput
-              style={styles.textInput} placeholder="e.g. Juan dela Cruz"
-              value={driverName} onChangeText={setDriverName}
-              autoCapitalize="words" placeholderTextColor="#9CA3AF"
-            />
+            <TextInput style={styles.textInput} placeholder="e.g. Juan dela Cruz" value={driverName} onChangeText={setDriverName} autoCapitalize="words" placeholderTextColor="#9CA3AF" />
             <Text style={styles.inputLabel}>Plate Number</Text>
-            <TextInput
-              style={styles.textInput} placeholder="e.g. ABC 1234"
-              value={plateNumber} onChangeText={setPlateNumber}
-              autoCapitalize="characters" placeholderTextColor="#9CA3AF"
-            />
+            <TextInput style={styles.textInput} placeholder="e.g. ABC 1234" value={plateNumber} onChangeText={setPlateNumber} autoCapitalize="characters" placeholderTextColor="#9CA3AF" />
             <TouchableOpacity style={styles.saveProfileBtn} onPress={saveProfileAndStart}>
               <Text style={styles.saveProfileBtnText}>Save & Start Trip</Text>
               <ChevronRight color="white" size={20} />
@@ -1060,7 +1064,7 @@ export default function MapScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* ── DESTINATION MODAL ────────────────────────────────────────────── */}
+      {/* DESTINATION MODAL */}
       <Modal visible={routeModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -1081,15 +1085,13 @@ export default function MapScreen() {
         </View>
       </Modal>
 
-      {/* ── RIDE REQUEST MODAL (available to everyone, no login needed) ──── */}
+      {/* RIDE REQUEST MODAL */}
       <Modal visible={rideRequestModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Where are you going?</Text>
-            <Text style={styles.profileSubtitle}>
-              Drivers heading your way will see your location on the map. No account needed.
-            </Text>
+            <Text style={styles.profileSubtitle}>Drivers heading your way will see your location on the map. No account needed.</Text>
             <TouchableOpacity onPress={() => submitRideRequest('Town')} style={styles.destinationCard}>
               <View style={[styles.destinationIcon, { backgroundColor: '#DBEAFE' }]}><MapPin color="#15803d" size={24} /></View>
               <View style={{ flex: 1 }}>
@@ -1111,49 +1113,33 @@ export default function MapScreen() {
         </View>
       </Modal>
 
-      {/* ── FARE CALCULATOR MODAL (non-drivers only) ─────────────────────── */}
+      {/* FARE CALCULATOR MODAL */}
       <Modal visible={fareCalcVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
               <Text style={styles.modalTitle}>Fare Calculator</Text>
-              <TouchableOpacity
-                onPress={() => { setFareCalcVisible(false); setFareFrom(''); setFareTo(''); }}
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              >
+              <TouchableOpacity onPress={() => { setFareCalcVisible(false); setFareFrom(''); setFareTo(''); }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
                 <X color="#6B7280" size={24} />
               </TouchableOpacity>
             </View>
-
             <Text style={styles.inputLabel}>From</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}
-              contentContainerStyle={{ gap: 8 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }} contentContainerStyle={{ gap: 8 }}>
               {['Town', 'Shell', 'Junction', 'Centro', 'Friendship', 'Balacbac'].map(stop => (
-                <TouchableOpacity
-                  key={'from-' + stop}
-                  onPress={() => setFareFrom(stop)}
-                  style={[styles.stopChip, fareFrom === stop && styles.stopChipActive]}
-                >
+                <TouchableOpacity key={'from-' + stop} onPress={() => setFareFrom(stop)} style={[styles.stopChip, fareFrom === stop && styles.stopChipActive]}>
                   <Text style={[styles.stopChipText, fareFrom === stop && styles.stopChipTextActive]}>{stop}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
-
             <Text style={styles.inputLabel}>To</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 20 }}
-              contentContainerStyle={{ gap: 8 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 20 }} contentContainerStyle={{ gap: 8 }}>
               {['Town', 'Shell', 'Junction', 'Centro', 'Friendship', 'Balacbac'].map(stop => (
-                <TouchableOpacity
-                  key={'to-' + stop}
-                  onPress={() => setFareTo(stop)}
-                  style={[styles.stopChip, fareTo === stop && styles.stopChipActive]}
-                >
+                <TouchableOpacity key={'to-' + stop} onPress={() => setFareTo(stop)} style={[styles.stopChip, fareTo === stop && styles.stopChipActive]}>
                   <Text style={[styles.stopChipText, fareTo === stop && styles.stopChipTextActive]}>{stop}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
-
             {fareFrom && fareTo && fareFrom !== fareTo ? (
               <View style={styles.fareResult}>
                 <Text style={styles.fareResultRoute}>{fareFrom} To {fareTo}</Text>
@@ -1178,181 +1164,88 @@ export default function MapScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8f9fa' },
-
   fareCalcFab: {
     position: 'absolute', bottom: 100, right: 16,
-    width: 52, height: 52, borderRadius: 26,
-    backgroundColor: '#15803d',
+    width: 52, height: 52, borderRadius: 26, backgroundColor: '#15803d',
     alignItems: 'center', justifyContent: 'center',
     shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.2, shadowRadius: 6, elevation: 8, zIndex: 50,
   },
-
-  stopChip: {
-    paddingHorizontal: 14, paddingVertical: 8,
-    borderRadius: 20, borderWidth: 1.5, borderColor: '#E5E7EB',
-    backgroundColor: '#F9FAFB',
-  },
+  stopChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: '#E5E7EB', backgroundColor: '#F9FAFB' },
   stopChipActive: { backgroundColor: '#15803d', borderColor: '#15803d' },
   stopChipText: { fontSize: 13, fontWeight: '600', color: '#374151' },
   stopChipTextActive: { color: 'white' },
-  fareResult: {
-    backgroundColor: '#F0FDF4', borderRadius: 16, padding: 18,
-    alignItems: 'center', marginBottom: 8,
-  },
+  fareResult: { backgroundColor: '#F0FDF4', borderRadius: 16, padding: 18, alignItems: 'center', marginBottom: 8 },
   fareResultRoute: { fontSize: 13, color: '#6B7280', fontWeight: '600', marginBottom: 4 },
   fareResultAmount: { fontSize: 36, fontWeight: '900', color: '#15803d' },
   fareResultNote: { fontSize: 12, color: '#6B7280', marginTop: 4 },
-
   passengerPanel: { position: 'absolute', bottom: 20, left: 16, right: 16, zIndex: 40 },
   rideRequestBtn: {
     backgroundColor: '#0b600f', borderRadius: 18, paddingVertical: 16,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-    shadowColor: '#04350a', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35, shadowRadius: 10, elevation: 8,
+    shadowColor: '#04350a', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 10, elevation: 8,
   },
   rideRequestBtnText: { color: 'white', fontWeight: '800', fontSize: 16 },
-  activeRequestCard: {
-    backgroundColor: 'white', borderRadius: 18, padding: 16,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12, shadowRadius: 12, elevation: 8,
-  },
+  activeRequestCard: { backgroundColor: 'white', borderRadius: 18, padding: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.12, shadowRadius: 12, elevation: 8 },
   activeRequestInfo: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
   activeRequestEmoji: { fontSize: 28 },
   activeRequestTitle: { fontSize: 15, fontWeight: '700', color: '#111827' },
   activeRequestSub: { fontSize: 12, color: '#6B7280', marginTop: 2 },
-  cancelRequestBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    backgroundColor: '#FEE2E2', borderRadius: 12, paddingVertical: 10,
-  },
+  cancelRequestBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#FEE2E2', borderRadius: 12, paddingVertical: 10 },
   cancelRequestText: { color: '#DC2626', fontWeight: '700', fontSize: 14 },
-
   driverPanel: { position: 'absolute', bottom: 20, left: 16, right: 16 },
-  activeTripCard: {
-    backgroundColor: 'white', borderRadius: 20, padding: 20,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15, shadowRadius: 16, elevation: 8,
-  },
+  activeTripCard: { backgroundColor: 'white', borderRadius: 20, padding: 20, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 16, elevation: 8 },
   tripHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
-  tripIconContainer: {
-    width: 48, height: 48, borderRadius: 24, backgroundColor: '#D1FAE5',
-    alignItems: 'center', justifyContent: 'center', marginRight: 12,
-  },
+  tripIconContainer: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#D1FAE5', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   tripLabel: { fontSize: 12, color: '#6B7280', fontWeight: '600', textTransform: 'uppercase' },
   tripDestination: { fontSize: 18, fontWeight: '700', color: '#1F2937' },
   statusButtonsRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
-  statusButton: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 18, borderRadius: 14, gap: 8, borderWidth: 2, borderColor: '#E5E7EB',
-  },
+  statusButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 18, borderRadius: 14, gap: 8, borderWidth: 2, borderColor: '#E5E7EB' },
   statusButtonActive: { borderColor: '#15803d' },
   availableButton: { backgroundColor: '#F0FDF4' },
   fullButton: { backgroundColor: '#FEF2F2' },
   statusButtonText: { fontSize: 15, fontWeight: '700', color: '#6B7280' },
   statusButtonTextActive: { color: '#1F2937' },
-  endTripBtn: {
-    backgroundColor: '#FEE2E2', borderRadius: 14, paddingVertical: 16,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-  },
+  endTripBtn: { backgroundColor: '#FEE2E2', borderRadius: 14, paddingVertical: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   endTripText: { color: '#DC2626', fontWeight: '700', fontSize: 15 },
-  startTripCard: {
-    backgroundColor: 'white', borderRadius: 20, padding: 20,
-    shadowColor: '#000', shadowOpacity: 0.15, elevation: 8,
-  },
+  startTripCard: { backgroundColor: 'white', borderRadius: 20, padding: 20, shadowColor: '#000', shadowOpacity: 0.15, elevation: 8 },
   startTripContent: { flexDirection: 'row', alignItems: 'center' },
-  startIconContainer: {
-    width: 56, height: 56, borderRadius: 28, backgroundColor: '#15803d',
-    alignItems: 'center', justifyContent: 'center', marginRight: 16,
-  },
+  startIconContainer: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#15803d', alignItems: 'center', justifyContent: 'center', marginRight: 16 },
   startTripTitle: { fontSize: 18, fontWeight: '700' },
   startTripSubtitle: { fontSize: 14, color: '#6B7280' },
-  arrowContainer: {
-    width: 32, height: 32, borderRadius: 16, backgroundColor: '#15803d', alignItems: 'center', justifyContent: 'center',
-  },
-
-  departureBanner: {
-    position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: '#15803d',
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    paddingHorizontal: 16, paddingVertical: 14,
-    paddingTop: Platform.OS === 'ios' ? 52 : 14,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2, shadowRadius: 8, elevation: 10, zIndex: 999,
-  },
-  departureBannerIcon: {
-    width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center', justifyContent: 'center',
-  },
+  arrowContainer: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#15803d', alignItems: 'center', justifyContent: 'center' },
+  departureBanner: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: '#15803d', flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14, paddingTop: Platform.OS === 'ios' ? 52 : 14, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 10, zIndex: 999 },
+  departureBannerIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },
   departureBannerTitle: { color: '#fff', fontWeight: '700', fontSize: 14 },
   departureBannerMsg: { color: 'rgba(255,255,255,0.9)', fontSize: 12, marginTop: 2 },
-
-  sheetOverlay: {
-    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end', zIndex: 100,
-  },
-  jeepInfoSheet: {
-    backgroundColor: 'white', borderTopLeftRadius: 28, borderTopRightRadius: 28,
-    padding: 24, paddingBottom: 40,
-    shadowColor: '#000', shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.12, shadowRadius: 16, elevation: 20,
-  },
-  sheetHandle: {
-    width: 40, height: 5, backgroundColor: '#E5E7EB',
-    borderRadius: 3, alignSelf: 'center', marginBottom: 20,
-  },
+  sheetOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end', zIndex: 100 },
+  jeepInfoSheet: { backgroundColor: 'white', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.12, shadowRadius: 16, elevation: 20 },
+  sheetHandle: { width: 40, height: 5, backgroundColor: '#E5E7EB', borderRadius: 3, alignSelf: 'center', marginBottom: 20 },
   sheetTitle: { fontSize: 20, fontWeight: '800', color: '#111827' },
-  sheetRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 14,
-    paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#F3F4F6',
-  },
+  sheetRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
   sheetIconBox: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   sheetRowLabel: { fontSize: 11, color: '#9CA3AF', fontWeight: '600', textTransform: 'uppercase', marginBottom: 2 },
   sheetRowValue: { fontSize: 16, fontWeight: '700', color: '#1F2937' },
   sheetDriverHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
   sheetDriverAvatar: { width: 60, height: 60, borderRadius: 30, borderWidth: 2, borderColor: '#E5E7EB' },
-  sheetDriverAvatarFallback: {
-    width: 60, height: 60, borderRadius: 30, backgroundColor: '#F3F4F6',
-    alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#E5E7EB',
-  },
+  sheetDriverAvatarFallback: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#E5E7EB' },
   sheetDriverPlate: { fontSize: 13, color: '#6B7280', fontWeight: '600', marginTop: 2 },
-  fullBadge: {
-    marginLeft: 'auto', backgroundColor: '#FEE2E2', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4,
-  },
+  fullBadge: { marginLeft: 'auto', backgroundColor: '#FEE2E2', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
   fullBadgeText: { color: '#DC2626', fontWeight: '800', fontSize: 12 },
-  sheetCloseBtn: {
-    marginTop: 20, backgroundColor: '#F3F4F6', borderRadius: 14, paddingVertical: 16, alignItems: 'center',
-  },
+  sheetCloseBtn: { marginTop: 20, backgroundColor: '#F3F4F6', borderRadius: 14, paddingVertical: 16, alignItems: 'center' },
   sheetCloseBtnText: { color: '#374151', fontWeight: '700', fontSize: 15 },
-
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  modalContent: {
-    backgroundColor: 'white', borderTopLeftRadius: 32, borderTopRightRadius: 32,
-    padding: 24, paddingBottom: 40,
-  },
-  modalHandle: {
-    width: 40, height: 5, backgroundColor: '#E5E7EB',
-    borderRadius: 3, alignSelf: 'center', marginBottom: 20,
-  },
+  modalContent: { backgroundColor: 'white', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, paddingBottom: 40 },
+  modalHandle: { width: 40, height: 5, backgroundColor: '#E5E7EB', borderRadius: 3, alignSelf: 'center', marginBottom: 20 },
   modalTitle: { fontSize: 24, fontWeight: '700', marginBottom: 8 },
-  destinationCard: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#F9FAFB',
-    borderRadius: 16, padding: 16, marginBottom: 12,
-  },
-  destinationIcon: {
-    width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center', marginRight: 16,
-  },
+  destinationCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F9FAFB', borderRadius: 16, padding: 16, marginBottom: 12 },
+  destinationIcon: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center', marginRight: 16 },
   destinationTitle: { fontSize: 16, fontWeight: '700' },
   cancelBtn: { marginTop: 12, paddingVertical: 16, alignItems: 'center' },
   cancelText: { color: '#6B7280', fontSize: 16, fontWeight: '600' },
   profileSubtitle: { color: '#6B7280', fontSize: 14, marginBottom: 20 },
   inputLabel: { fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 8 },
-  textInput: {
-    backgroundColor: '#F9FAFB', borderWidth: 1.5, borderColor: '#E5E7EB',
-    borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14,
-    fontSize: 16, color: '#111827', marginBottom: 16,
-  },
-  saveProfileBtn: {
-    backgroundColor: '#15803d', borderRadius: 14, paddingVertical: 16,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 4,
-  },
+  textInput: { backgroundColor: '#F9FAFB', borderWidth: 1.5, borderColor: '#E5E7EB', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14, fontSize: 16, color: '#111827', marginBottom: 16 },
+  saveProfileBtn: { backgroundColor: '#15803d', borderRadius: 14, paddingVertical: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 4 },
   saveProfileBtnText: { color: 'white', fontWeight: '700', fontSize: 16 },
 });
