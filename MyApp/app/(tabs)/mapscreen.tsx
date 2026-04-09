@@ -8,6 +8,8 @@ import { Navigation as NavIcon, MapPin, Circle, XCircle, User, Truck, ChevronRig
 import { ref, onValue, update, get, remove, push } from "firebase/database"; // ← added push
 import { auth, db } from "../../services/firebase";
 import { FARE_ZONES } from "../../constants/routes";
+import PassengerCountModal from "../../components/PassengerCountModal";
+import { recordTripRevenue } from "../../hooks/useRevenue";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -30,6 +32,7 @@ const FARE_STOPS = ['Town', 'Shell', 'Junction', 'Centro', 'Friendship', 'Balacb
 const STOP_ORDER: Record<string, number> = {
   'Town': 0, 'Shell': 1, 'Junction': 2, 'Centro': 3, 'Friendship': 4, 'Balacbac': 5,
 };
+
 function getZoneFare(from: string, to: string): number {
   const diff = Math.abs((STOP_ORDER[from] ?? 0) - (STOP_ORDER[to] ?? 0));
   if (diff === 0) return 0;
@@ -116,6 +119,10 @@ export default function MapScreen() {
       if (status !== 'granted') console.log('Notification permission not granted');
     })();
   }, []);
+
+// ──────────────────────────────────────────────
+const [passengerModalVisible, setPassengerModalVisible] = useState(false);
+ 
 
   useEffect(() => {
     if (currentDest) {
@@ -326,6 +333,7 @@ if (auth.currentUser) {
   };
 
   const endTrip = () => {
+    setPassengerModalVisible(true);
     Alert.alert("End Trip", "Are you sure you want to end the current trip?", [
       { text: "Cancel", style: "cancel" },
       { text: "End Trip", style: "destructive", onPress: async () => {
@@ -567,10 +575,85 @@ if (auth.currentUser) {
         ];
 
         setTimeout(function() {
-          if (window.ReactNativeWebView) {
-            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
-          }
-        }, 500);
+  if (window.ReactNativeWebView) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
+  }
+}, 500);
+
+// ── Static Balacbac → Town route (Grab-style) ──────────────────
+var staticRouteLayers = [];
+
+function drawStaticRoute(coords) {
+  staticRouteLayers.forEach(function(l) { map.removeLayer(l); });
+  staticRouteLayers = [];
+  if (!coords || coords.length === 0) return;
+
+  // Outer white border for visibility
+  staticRouteLayers.push(
+    L.polyline(coords, {
+      color: 'rgba(255,255,255,0.9)',
+      weight: 14,
+      opacity: 1,
+      lineCap: 'round',
+      lineJoin: 'round',
+      smoothFactor: 1,
+    }).addTo(map)
+  );
+
+  // Soft dark shadow layer
+  staticRouteLayers.push(
+    L.polyline(coords, {
+      color: 'rgba(21,128,61,0.25)',
+      weight: 12,
+      opacity: 1,
+      lineCap: 'round',
+      lineJoin: 'round',
+      smoothFactor: 1,
+    }).addTo(map)
+  );
+
+  // Main route line — #15803d (your existing green)
+  staticRouteLayers.push(
+    L.polyline(coords, {
+      color: '#15803d',
+      weight: 7,
+      opacity: 0.85,
+      lineCap: 'round',
+      lineJoin: 'round',
+      smoothFactor: 1,
+    }).addTo(map)
+  );
+
+  // Directional dash overlay for movement feel
+  staticRouteLayers.push(
+    L.polyline(coords, {
+      color: 'rgba(255,255,255,0.55)',
+      weight: 3,
+      opacity: 1,
+      lineCap: 'round',
+      lineJoin: 'round',
+      smoothFactor: 1,
+      dashArray: '1, 18',
+    }).addTo(map)
+  );
+}
+
+function fetchAndDrawStaticRoute() {
+  var waypoints = ROUTE_WAYPOINTS_FWD;
+  var coordStr = waypoints.map(function(p) { return p[1] + ',' + p[0]; }).join(';');
+  fetch('https://router.project-osrm.org/route/v1/driving/' + coordStr + '?overview=full&geometries=geojson&annotations=false')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.routes || !data.routes[0]) return;
+      var coords = data.routes[0].geometry.coordinates.map(function(c) {
+        return [c[1], c[0]];
+      });
+      drawStaticRoute(coords);
+    })
+    .catch(function(e) { console.log('Static route fetch error:', e); });
+}
+
+fetchAndDrawStaticRoute();
 
         function makeJeepneySVG() {
           return '<svg width="30" height="28" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg">'
@@ -1158,6 +1241,32 @@ if (auth.currentUser) {
           </View>
         </View>
       </Modal>
+      <PassengerCountModal
+  visible={passengerModalVisible}
+  destination={currentDest}
+  onCancel={() => setPassengerModalVisible(false)}
+  onConfirm={async (passengerCount , farePerPassenger) => {
+    setPassengerModalVisible(false);
+ 
+    // Save revenue to Firebase
+    if (auth.currentUser) {
+      const jeepInfoSnap = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
+      const driverName = jeepInfoSnap.exists()
+        ? (jeepInfoSnap.val().driverName ?? "Unknown Driver")
+        : "Unknown Driver";
+ 
+      await recordTripRevenue({
+        driverId: auth.currentUser.uid,
+        driverName,
+        passengerCount,
+        farePerPassenger,
+        route: currentDest === "Town" ? "Balacbac–Town" : "Town–Balacbac",
+        tripId: currentTripIdRef.current ?? `trip_${Date.now()}`,
+      });
+    }
+    await endTripSilent();
+  }}
+/>
     </View>
   );
 }
