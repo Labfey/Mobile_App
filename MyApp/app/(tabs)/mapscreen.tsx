@@ -362,7 +362,6 @@ export default function MapScreen() {
   // TRIP CONTROL
   // ─────────────────────────────────────────────────────────────────────────────
 
-  // Silent end — used by auto-complete and by onConfirm after revenue is logged
   const endTripSilent = async () => {
     setCurrentDest(null);
     postMessageToWebView({ type: "CLEAR_ZONES" });
@@ -370,12 +369,10 @@ export default function MapScreen() {
     if (isTracking) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
     if (auth.currentUser) {
       await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
-      // Log trip end to driver_trips
       if (currentTripIdRef.current) {
         update(ref(db, `driver_trips/${auth.currentUser.uid}/${currentTripIdRef.current}`), { endTime: Date.now() }).catch(() => {});
         currentTripIdRef.current = null;
       }
-      // Log trip end to history
       if (currentHistoryKeyRef.current) {
         const now = new Date();
         const dateKey    = now.toISOString().split("T")[0];
@@ -389,7 +386,6 @@ export default function MapScreen() {
     }
   };
 
-  // endTrip — opens the passenger count modal first so revenue can be logged
   const endTrip = () => {
     setPassengerModalVisible(true);
   };
@@ -413,7 +409,6 @@ export default function MapScreen() {
   const _executeStartTrip = async (destination: "Town" | "Balacbac") => {
     postMessageToWebView({ type: "CLEAR_ZONES" });
 
-    // Start background location tracking
     if (role === "driver") {
       const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
       if (bgStatus === "granted") {
@@ -428,7 +423,6 @@ export default function MapScreen() {
       }
     }
 
-    // Tell the WebView to fetch and draw the route for this direction
     const originalColors = ["#22c55e", "#eab308", "#f97316", "#ef4444"];
     postMessageToWebView({
       type: "DRAW_ZONES",
@@ -441,7 +435,6 @@ export default function MapScreen() {
     setCurrentDest(destination);
     setRouteModalVisible(false);
 
-    // Departure notification if near a terminal
     if (currentLocationRef.current) {
       const { lat, lng } = currentLocationRef.current;
       const nearTown   = haversineMeters(lat, lng, TERMINALS.TOWN.lat,   TERMINALS.TOWN.lng)   < TERMINAL_RADIUS_METERS;
@@ -457,7 +450,6 @@ export default function MapScreen() {
     if (auth.currentUser) {
       update(ref(db, `jeeps/${auth.currentUser.uid}`), { destination, status: isFull ? "full" : "available" });
 
-      // Log trip start to driver_trips (for admin driver stats view)
       const tripRef = push(ref(db, `driver_trips/${auth.currentUser.uid}`));
       currentTripIdRef.current = tripRef.key;
       update(tripRef, {
@@ -467,7 +459,6 @@ export default function MapScreen() {
         endTime: null,
       }).catch(() => {});
 
-      // Log trip start to history
       const now        = new Date();
       const dateKey    = now.toISOString().split("T")[0];
       const timeStr    = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -508,11 +499,12 @@ export default function MapScreen() {
 
   // ─────────────────────────────────────────────────────────────────────────────
   // MAP HTML
-  // Contains the full Leaflet setup with:
-  //   • Static background route (always-visible green line for commuters)
-  //   • Dynamic Grab-style consumed/remaining split for active driver trips
-  //   • Snap-to-road: driver marker moves to nearest point on polyline
-  //   • Ride request markers, jeep markers, departure detection
+  // Changes from v1:
+  //  • NO static route drawn on load — clean blank map until a driver starts
+  //  • Passenger taps jeep marker → showJeepRoute draws the route for that jeep
+  //  • Driver starts trip → initDriverRoute draws Grab-style consumed/remaining
+  //  • Redesigned markers: pill for active driver, bubble for other jeeps,
+  //    blue pulsing dot for passengers
   // ─────────────────────────────────────────────────────────────────────────────
 
   const mapHtml = `
@@ -524,69 +516,102 @@ export default function MapScreen() {
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
       <style>
         body { margin: 0; padding: 0; }
-        #map { height: 100vh; width: 100vw; background: #f8f9fa; }
+        #map { height: 100vh; width: 100vw; background: #f0f4f0; }
+
+        /* ── Passenger dot (self, non-driver) ─────────────────────────────── */
         .passenger-dot {
-          width: 18px; height: 18px; background: #3b82f6;
+          width: 20px; height: 20px; background: #3b82f6;
           border: 3px solid white; border-radius: 50%;
-          box-shadow: 0 2px 8px rgba(59,130,246,0.5), 0 0 0 6px rgba(59,130,246,0.15);
-          animation: passengerPulse 2s infinite;
+          box-shadow: 0 2px 10px rgba(59,130,246,0.55), 0 0 0 8px rgba(59,130,246,0.12);
+          animation: passPulse 2s infinite;
         }
-        @keyframes passengerPulse {
-          0%,100% { box-shadow: 0 2px 8px rgba(59,130,246,0.5), 0 0 0 6px rgba(59,130,246,0.15); }
-          50%      { box-shadow: 0 2px 8px rgba(59,130,246,0.7), 0 0 0 10px rgba(59,130,246,0.25); }
+        @keyframes passPulse {
+          0%,100% { box-shadow: 0 2px 10px rgba(59,130,246,0.55), 0 0 0 8px rgba(59,130,246,0.12); }
+          50%      { box-shadow: 0 2px 10px rgba(59,130,246,0.7), 0 0 0 14px rgba(59,130,246,0.18); }
         }
-        .driver-marker-wrap {
+
+        /* ── Driver pill (self, ACTIVE trip) ──────────────────────────────── */
+        .driver-pill {
+          background: linear-gradient(135deg,#22c55e,#15803d);
+          border: 2.5px solid white; border-radius: 22px;
+          padding: 7px 12px 7px 9px;
+          display: flex; align-items: center; gap: 6px;
+          box-shadow: 0 4px 14px rgba(21,128,61,0.6);
+          white-space: nowrap; animation: pillPulse 2.5s infinite;
+        }
+        .driver-pill.full {
+          background: linear-gradient(135deg,#f87171,#dc2626) !important;
+          box-shadow: 0 4px 14px rgba(220,38,38,0.6) !important;
+          animation: pillPulseFull 1.5s infinite !important;
+        }
+        @keyframes pillPulse {
+          0%,100% { box-shadow: 0 4px 14px rgba(21,128,61,0.6); }
+          50%      { box-shadow: 0 6px 20px rgba(21,128,61,0.8); }
+        }
+        @keyframes pillPulseFull {
+          0%,100% { box-shadow: 0 4px 14px rgba(220,38,38,0.6); }
+          50%      { box-shadow: 0 6px 20px rgba(220,38,38,0.8); }
+        }
+        .driver-live-dot {
+          width: 7px; height: 7px; border-radius: 50%;
+          background: #86efac; flex-shrink: 0;
+          animation: liveBlink 1.2s ease infinite;
+        }
+        .driver-pill.full .driver-live-dot { background: #fca5a5; }
+        @keyframes liveBlink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
+        .driver-pill-label {
+          color: white; font-size: 11px; font-weight: 900; letter-spacing: 0.4px;
+        }
+
+        /* ── Driver circle (self, IDLE / no active trip) ────────────────────── */
+        .driver-idle {
+          width: 46px; height: 46px;
+          background: linear-gradient(145deg,#22c55e,#15803d);
+          border: 2.5px solid white; border-radius: 23px;
           display: flex; align-items: center; justify-content: center;
-          width: 48px; height: 48px;
-          background: radial-gradient(circle at 40% 35%, #22c55e, #15803d);
-          border: 3px solid white; border-radius: 50%;
-          box-shadow: 0 4px 14px rgba(21,128,61,0.55), 0 0 0 5px rgba(21,128,61,0.18);
-          animation: driverPulse 2.5s infinite;
+          box-shadow: 0 4px 12px rgba(21,128,61,0.5);
+          animation: idlePulse 3s infinite;
         }
-        .driver-marker-wrap.driver-full {
-          background: radial-gradient(circle at 40% 35%, #f87171, #dc2626) !important;
-          box-shadow: 0 4px 14px rgba(220,38,38,0.55), 0 0 0 5px rgba(220,38,38,0.18) !important;
-          animation: fullPulse 1.5s infinite !important;
+        @keyframes idlePulse {
+          0%,100% { box-shadow: 0 4px 12px rgba(21,128,61,0.5); }
+          50%      { box-shadow: 0 4px 18px rgba(21,128,61,0.7); }
         }
-        @keyframes driverPulse {
-          0%,100% { box-shadow: 0 4px 14px rgba(21,128,61,0.55), 0 0 0 5px rgba(21,128,61,0.18); }
-          50%      { box-shadow: 0 4px 14px rgba(21,128,61,0.75), 0 0 0 9px rgba(21,128,61,0.28); }
-        }
-        @keyframes fullPulse {
-          0%,100% { box-shadow: 0 4px 14px rgba(220,38,38,0.55), 0 0 0 5px rgba(220,38,38,0.18); }
-          50%      { box-shadow: 0 4px 14px rgba(220,38,38,0.75), 0 0 0 9px rgba(220,38,38,0.28); }
-        }
-        .jeep-marker {
+
+        /* ── Other jeep bubbles ─────────────────────────────────────────────── */
+        .jeep-bubble {
+          width: 44px; height: 44px;
+          background: linear-gradient(145deg,#22c55e,#15803d);
+          border: 2.5px solid white; border-radius: 22px;
           display: flex; align-items: center; justify-content: center;
-          width: 48px; height: 48px;
-          background: radial-gradient(circle at 40% 35%, #22c55e, #15803d);
-          border: 3px solid white; border-radius: 50%;
-          box-shadow: 0 4px 12px rgba(21,128,61,0.45);
-          cursor: pointer; transition: transform 0.2s ease;
+          box-shadow: 0 3px 10px rgba(21,128,61,0.45);
+          cursor: pointer; transition: transform 0.15s ease;
         }
-        .jeep-marker:hover { transform: scale(1.12); }
-        .jeep-marker.jeep-full {
-          background: radial-gradient(circle at 40% 35%, #f87171, #dc2626) !important;
-          box-shadow: 0 4px 12px rgba(220,38,38,0.5) !important;
+        .jeep-bubble:hover { transform: scale(1.1); }
+        .jeep-bubble.full {
+          background: linear-gradient(145deg,#f87171,#dc2626) !important;
+          box-shadow: 0 3px 10px rgba(220,38,38,0.5) !important;
           animation: fullBounce 1.2s ease infinite;
         }
         @keyframes fullBounce { 0%,100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+
+        /* ── Ride request pin ──────────────────────────────────────────────── */
         .ride-request-marker {
-          width: 40px; height: 40px;
-          background: #15803d; border: 3px solid white; border-radius: 50%;
+          width: 42px; height: 42px;
+          background: #2563eb; border: 3px solid white; border-radius: 50%;
           display: flex; align-items: center; justify-content: center;
           font-size: 20px; line-height: 1;
-          box-shadow: 0 4px 12px rgba(48,175,36,0.5);
+          box-shadow: 0 4px 12px rgba(37,99,235,0.55);
           animation: ridePulse 1.4s ease infinite; cursor: pointer;
         }
         @keyframes ridePulse {
           0%,100% { transform: scale(1); }
           50%      { transform: scale(1.12); }
         }
+
         .jeep-tooltip {
-          background: white; border-radius: 8px; padding: 6px 10px;
+          background: white; border-radius: 10px; padding: 7px 12px;
           font-size: 12px; font-weight: 700; color: #111;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.15); white-space: nowrap;
+          box-shadow: 0 3px 12px rgba(0,0,0,0.18); white-space: nowrap;
         }
       </style>
     </head>
@@ -612,12 +637,11 @@ export default function MapScreen() {
         var passengerViewRoutes = [];
 
         // Route state — Grab-style consumed/remaining split
-        var fullRouteCoords = [];   // complete OSRM geometry for current trip
-        var consumedLayer   = null; // grey line behind the driver
-        var remainingBorder = null; // white border under the green line
-        var remainingLayer  = null; // green line ahead of the driver
-        var remainingDashes = null; // white dash overlay for movement feel
-        var staticLayers    = [];   // always-visible background route
+        var fullRouteCoords = [];
+        var consumedLayer   = null;
+        var remainingBorder = null;
+        var remainingLayer  = null;
+        var remainingDashes = null;
 
         // Fixed waypoints for the Balacbac ↔ Town corridor
         var ROUTE_WAYPOINTS_FWD = [
@@ -637,7 +661,6 @@ export default function MapScreen() {
         }, 500);
 
         // ── OSRM FETCH ────────────────────────────────────────────────────────
-        // Fetches the road-snapped geometry between the given waypoints.
         function fetchRoute(waypoints, callback) {
           var coordStr = waypoints.map(function(p) { return p[1]+','+p[0]; }).join(';');
           fetch('https://router.project-osrm.org/route/v1/driving/'+coordStr
@@ -651,30 +674,6 @@ export default function MapScreen() {
             .catch(function() { callback(null); });
         }
 
-        // ── STATIC BACKGROUND ROUTE ───────────────────────────────────────────
-        // Drawn once on load so commuters see the route even before any driver
-        // starts a trip. Hidden when a driver activates a trip.
-        function drawStaticRoute(coords) {
-          staticLayers.forEach(function(l) { map.removeLayer(l); });
-          staticLayers = [];
-          if (!coords || coords.length === 0) return;
-          var base = { lineCap: 'round', lineJoin: 'round', smoothFactor: 1 };
-          staticLayers.push(L.polyline(coords, Object.assign({}, base, { color: 'rgba(255,255,255,0.9)', weight: 14, opacity: 1 })).addTo(map));
-          staticLayers.push(L.polyline(coords, Object.assign({}, base, { color: 'rgba(21,128,61,0.18)', weight: 12, opacity: 1 })).addTo(map));
-          staticLayers.push(L.polyline(coords, Object.assign({}, base, { color: '#15803d', weight: 7, opacity: 0.65 })).addTo(map));
-          staticLayers.push(L.polyline(coords, Object.assign({}, base, { color: 'rgba(255,255,255,0.45)', weight: 3, opacity: 1, dashArray: '1, 18' })).addTo(map));
-        }
-
-        function clearStaticRoute() {
-          staticLayers.forEach(function(l) { map.removeLayer(l); });
-          staticLayers = [];
-        }
-
-        // Fetch and draw the static route on map load
-        fetchRoute(ROUTE_WAYPOINTS_FWD, function(coords) {
-          if (coords) drawStaticRoute(coords);
-        });
-
         // ── HAVERSINE (metres) ────────────────────────────────────────────────
         function haversineM(lat1, lng1, lat2, lng2) {
           var R = 6371000;
@@ -687,9 +686,6 @@ export default function MapScreen() {
         }
 
         // ── SNAP-TO-ROAD ──────────────────────────────────────────────────────
-        // Finds the closest point on fullRouteCoords to the raw GPS position.
-        // Interpolates on the segment between the two nearest neighbours for
-        // sub-vertex precision so the marker sits exactly on the line.
         function snapToRoute(dLat, dLng) {
           if (!fullRouteCoords.length) return null;
           var bestIdx  = 0;
@@ -698,7 +694,6 @@ export default function MapScreen() {
             var d = haversineM(dLat, dLng, fullRouteCoords[i][0], fullRouteCoords[i][1]);
             if (d < bestDist) { bestDist = d; bestIdx = i; }
           }
-          // Interpolate on segment (bestIdx-1) → bestIdx
           if (bestIdx > 0) {
             var A = fullRouteCoords[bestIdx-1];
             var B = fullRouteCoords[bestIdx];
@@ -717,30 +712,23 @@ export default function MapScreen() {
           return { idx: bestIdx, lat: fullRouteCoords[bestIdx][0], lng: fullRouteCoords[bestIdx][1], dist: bestDist };
         }
 
-        // ── DYNAMIC ROUTE UPDATE (called every location tick) ─────────────────
-        // Splits fullRouteCoords at the driver's snapped position:
-        //   consumed  (start → driver)  → grey, weight 5   (road behind)
-        //   remaining (driver → end)    → green, weight 7  (road ahead)
-        // Returns the snapped [lat,lng] for the marker position.
+        // ── DYNAMIC ROUTE UPDATE ──────────────────────────────────────────────
+        // Splits fullRouteCoords at driver position: grey behind, green ahead
         function updateDynamicRoute(driverLat, driverLng) {
           if (!fullRouteCoords.length || !hasActiveRoute) return null;
 
           var snap = snapToRoute(driverLat, driverLng);
           if (!snap) return null;
 
-          // Only snap the marker onto the route if within 80 m of the line.
-          // Beyond that the driver is off-road (e.g. parked) — show raw GPS.
           var SNAP_THRESHOLD = 80;
           var sLat = snap.dist < SNAP_THRESHOLD ? snap.lat : driverLat;
           var sLng = snap.dist < SNAP_THRESHOLD ? snap.lng : driverLng;
 
-          // Build consumed and remaining arrays
           var splitIdx  = snap.idx;
           var consumed  = fullRouteCoords.slice(0, splitIdx + 1);
           if (consumed.length) consumed[consumed.length-1] = [sLat, sLng];
           var remaining = [[sLat, sLng]].concat(fullRouteCoords.slice(splitIdx));
 
-          // Consumed layer — grey, thin, behind the vehicle
           if (consumed.length >= 2) {
             if (!consumedLayer) {
               consumedLayer = L.polyline(consumed, {
@@ -752,7 +740,6 @@ export default function MapScreen() {
             }
           }
 
-          // Remaining layers — white border + green line + white dashes
           if (remaining.length >= 2) {
             if (!remainingBorder) {
               remainingBorder = L.polyline(remaining, {
@@ -774,7 +761,7 @@ export default function MapScreen() {
             }
           }
 
-          // Route completion check — within 40 m of final waypoint
+          // Route completion — within 40 m of final waypoint
           var end     = fullRouteCoords[fullRouteCoords.length-1];
           var distEnd = haversineM(sLat, sLng, end[0], end[1]);
           if (distEnd < 40 && hasActiveRoute) {
@@ -797,12 +784,13 @@ export default function MapScreen() {
         }
 
         // ── INIT DRIVER TRIP ROUTE ────────────────────────────────────────────
-        // Called when DRAW_ZONES message arrives. Fetches road geometry from
-        // OSRM, stores it in fullRouteCoords, and draws the initial full
-        // remaining line (nothing consumed yet).
+        // Called when DRAW_ZONES message arrives (driver starts trip).
+        // No static background route exists — just draw the active Grab-style route.
         function initDriverRoute(originLat, originLng, destination) {
           clearDynamicRoute();
-          clearStaticRoute(); // hide background while driving
+          // Also clear any passenger-view route that may have been shown
+          passengerViewRoutes.forEach(function(l) { map.removeLayer(l); });
+          passengerViewRoutes = [];
 
           var orderedWaypoints = destination === 'Balacbac'
             ? ROUTE_WAYPOINTS_FWD.slice()
@@ -814,7 +802,6 @@ export default function MapScreen() {
             fullRouteCoords = coords;
             hasActiveRoute  = true;
 
-            // Draw initial full remaining route
             remainingBorder = L.polyline(coords, {
               color: 'rgba(255,255,255,0.92)', weight: 12,
               lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
@@ -832,7 +819,9 @@ export default function MapScreen() {
           });
         }
 
-        // ── PASSENGER JEEP-TAP ROUTE (zone-coloured) ─────────────────────────
+        // ── PASSENGER JEEP-TAP ROUTE ──────────────────────────────────────────
+        // When a passenger taps a jeep bubble, draw a zone-coloured route for
+        // that specific jeep. Previous passenger routes are cleared first.
         function hexToRgb(hex) {
           var r = /^#?([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i.exec(hex);
           return r ? { r: parseInt(r[1],16), g: parseInt(r[2],16), b: parseInt(r[3],16) } : {r:0,g:0,b:0};
@@ -882,6 +871,7 @@ export default function MapScreen() {
           });
         }
         function showJeepRoute(jeepId) {
+          // Clear any previous passenger-view route
           passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
           passengerViewRoutes = [];
           var jeep = jeepsData[jeepId];
@@ -905,20 +895,20 @@ export default function MapScreen() {
           Object.keys(requests).forEach(function(id) {
             var r = requests[id];
             if (!r.lat || !r.lng) return;
-            var icon = L.divIcon({ className: '', html: '<div class="ride-request-marker">\\uD83D\\uDE4B</div>', iconSize: [40,40], iconAnchor: [20,20] });
+            var icon = L.divIcon({ className: '', html: '<div class="ride-request-marker">\\uD83D\\uDE4B</div>', iconSize: [42,42], iconAnchor: [21,21] });
             if (rideRequestMarkers[id]) {
               rideRequestMarkers[id].setLatLng([r.lat, r.lng]);
             } else {
               rideRequestMarkers[id] = L.marker([r.lat, r.lng], { icon: icon })
-                .bindTooltip('<div class="jeep-tooltip">\\uD83D\\uDE4B Needs a ride to '+(r.destination||'?')+'</div>', { permanent: false, direction: 'top', offset: [0,-22] })
+                .bindTooltip('<div class="jeep-tooltip">\\uD83D\\uDE4B Needs a ride to '+(r.destination||'?')+'</div>', { permanent: false, direction: 'top', offset: [0,-24] })
                 .addTo(map);
             }
           });
         }
 
-        // ── JEEP SVG MARKER ───────────────────────────────────────────────────
+        // ── JEEP SVG ──────────────────────────────────────────────────────────
         function makeJeepneySVG() {
-          return '<svg width="30" height="28" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg">'
+          return '<svg width="26" height="24" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg">'
             +'<rect x="0" y="4" width="6" height="10" rx="3" fill="rgba(255,255,255,0.82)"/>'
             +'<rect x="32" y="4" width="6" height="10" rx="3" fill="rgba(255,255,255,0.82)"/>'
             +'<rect x="0" y="20" width="6" height="10" rx="3" fill="rgba(255,255,255,0.82)"/>'
@@ -935,11 +925,21 @@ export default function MapScreen() {
             +'<rect x="26" y="29" width="6" height="3" rx="1.5" fill="#fca5a5" opacity="0.95"/>'
             +'</svg>';
         }
-        function makeDriverMarkerHtml(isFull) {
-          return '<div class="driver-marker-wrap'+(isFull?' driver-full':'')+'">'+makeJeepneySVG()+'</div>';
+
+        // ── MARKER HTML BUILDERS ──────────────────────────────────────────────
+        // Driver self marker:
+        //   isActive=true  → pill with LIVE/FULL label (Grab-style)
+        //   isActive=false → idle circle
+        function makeDriverMarkerHtml(isFull, isActive) {
+          if (isActive) {
+            return '<div class="driver-pill'+(isFull?' full':'')+'"><div class="driver-live-dot"></div>'+makeJeepneySVG()+'<div class="driver-pill-label">'+(isFull?'FULL':'LIVE')+'</div></div>';
+          }
+          return '<div class="driver-idle">'+makeJeepneySVG()+'</div>';
         }
+
+        // Other jeep markers — round bubble, red when full
         function makeJeepMarkerHtml(isFull) {
-          return '<div class="jeep-marker'+(isFull?' jeep-full':'')+'">'+makeJeepneySVG()+'</div>';
+          return '<div class="jeep-bubble'+(isFull?' full':'')+'">'+makeJeepneySVG()+'</div>';
         }
 
         // ── MESSAGE HANDLER ───────────────────────────────────────────────────
@@ -954,7 +954,6 @@ export default function MapScreen() {
               hasActiveRoute = m.hasActiveRoute || false;
               var isFull     = m.isFull || false;
 
-              // Snap driver marker to nearest point on route while driving
               var displayLat = m.lat, displayLng = m.lng;
               if (isDriverMode && hasActiveRoute && fullRouteCoords.length > 0) {
                 var snapped = updateDynamicRoute(m.lat, m.lng);
@@ -962,15 +961,22 @@ export default function MapScreen() {
               }
 
               function makeUserIcon() {
-                if (isDriverMode) return L.divIcon({ className: '', html: makeDriverMarkerHtml(isFull), iconSize: [48,48], iconAnchor: [24,24] });
-                return L.divIcon({ className: '', html: '<div class="passenger-dot"></div>', iconSize: [18,18], iconAnchor: [9,9] });
+                if (isDriverMode) {
+                  var html = makeDriverMarkerHtml(isFull, hasActiveRoute);
+                  // Pill is wider; idle is square
+                  if (hasActiveRoute) {
+                    return L.divIcon({ className: '', html: html, iconSize: [120, 36], iconAnchor: [60, 18] });
+                  }
+                  return L.divIcon({ className: '', html: html, iconSize: [46, 46], iconAnchor: [23, 23] });
+                }
+                return L.divIcon({ className: '', html: '<div class="passenger-dot"></div>', iconSize: [20, 20], iconAnchor: [10, 10] });
               }
 
               if (!userMarker) {
                 userMarker = L.marker([displayLat, displayLng], { icon: makeUserIcon() }).addTo(map);
                 map.panTo([displayLat, displayLng]);
               } else {
-                if (prevDriverMode !== isDriverMode || currentDriverFull !== isFull) {
+                if (prevDriverMode !== isDriverMode || currentDriverFull !== isFull || hasActiveRoute !== m.hasActiveRoute) {
                   currentDriverFull = isFull;
                   userMarker.setIcon(makeUserIcon());
                 }
@@ -983,13 +989,14 @@ export default function MapScreen() {
             if (m.type === 'SET_DRIVER_STATUS') {
               currentDriverFull = m.isFull;
               if (userMarker && isDriverMode) {
-                userMarker.setIcon(L.divIcon({ className: '', html: makeDriverMarkerHtml(m.isFull), iconSize: [48,48], iconAnchor: [24,24] }));
+                var html = makeDriverMarkerHtml(m.isFull, hasActiveRoute);
+                var sz   = hasActiveRoute ? [120,36] : [46,46];
+                var anc  = hasActiveRoute ? [60,18]  : [23,23];
+                userMarker.setIcon(L.divIcon({ className: '', html: html, iconSize: sz, iconAnchor: anc }));
               }
             }
 
             // ── DRAW_ZONES — driver starts a trip ────────────────────────────
-            // Fetches the real road route, stores coords, begins Grab-style
-            // consumed/remaining rendering.
             if (m.type === 'DRAW_ZONES') {
               var originLat = m.driverLat, originLng = m.driverLng;
               if (originLat === null || originLat === undefined) {
@@ -1000,13 +1007,12 @@ export default function MapScreen() {
             }
 
             // ── CLEAR_ZONES — trip ended ─────────────────────────────────────
-            // Removes dynamic layers and restores the static background route.
+            // Removes all route layers; map stays clean (no static route re-drawn)
             if (m.type === 'CLEAR_ZONES') {
               clearDynamicRoute();
+              passengerViewRoutes.forEach(function(l) { map.removeLayer(l); });
+              passengerViewRoutes = [];
               hasActiveRoute = false;
-              fetchRoute(ROUTE_WAYPOINTS_FWD, function(coords) {
-                if (coords) drawStaticRoute(coords);
-              });
             }
 
             // ── SET_JEEPS ────────────────────────────────────────────────────
@@ -1019,7 +1025,7 @@ export default function MapScreen() {
               jeepsData = newData;
               m.jeeps.forEach(function(j) {
                 var full = (j.status === 'full');
-                var icon = L.divIcon({ className: '', html: makeJeepMarkerHtml(full), iconSize: [48,48], iconAnchor: [24,24] });
+                var icon = L.divIcon({ className: '', html: makeJeepMarkerHtml(full), iconSize: [44,44], iconAnchor: [22,22] });
                 if (jeepMarkers[j.id]) {
                   jeepMarkers[j.id].setLatLng([j.latitude, j.longitude]);
                   jeepMarkers[j.id].setIcon(icon);
@@ -1028,6 +1034,7 @@ export default function MapScreen() {
                   marker.jeepId = j.id;
                   marker.on('click', function() {
                     var jd = jeepsData[this.jeepId];
+                    // Show route for this jeep (passenger interaction)
                     showJeepRoute(this.jeepId);
                     if (window.ReactNativeWebView) {
                       window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -1042,7 +1049,7 @@ export default function MapScreen() {
                 jeepMarkers[j.id].unbindTooltip();
                 jeepMarkers[j.id].bindTooltip(
                   '<div class="jeep-tooltip">\\uD83D\\uDE8C To '+(j.destination||'?')+(full?' \\u2014 FULL':' \\u2014 Available')+'</div>',
-                  { permanent: false, direction: 'top', offset: [0,-26] }
+                  { permanent: false, direction: 'top', offset: [0,-28] }
                 );
               });
             }
@@ -1430,17 +1437,17 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2, shadowRadius: 6, elevation: 8, zIndex: 50,
   },
 
-  stopChip:         { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: "#E5E7EB", backgroundColor: "#F9FAFB" },
-  stopChipActive:   { backgroundColor: "#15803d", borderColor: "#15803d" },
-  stopChipText:     { fontSize: 13, fontWeight: "600", color: "#374151" },
+  stopChip:          { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: "#E5E7EB", backgroundColor: "#F9FAFB" },
+  stopChipActive:    { backgroundColor: "#15803d", borderColor: "#15803d" },
+  stopChipText:      { fontSize: 13, fontWeight: "600", color: "#374151" },
   stopChipTextActive:{ color: "white" },
   fareResult:        { backgroundColor: "#F0FDF4", borderRadius: 16, padding: 18, alignItems: "center", marginBottom: 8 },
-  fareResultRoute:  { fontSize: 13, color: "#6B7280", fontWeight: "600", marginBottom: 4 },
-  fareResultAmount: { fontSize: 36, fontWeight: "900", color: "#15803d" },
-  fareResultNote:   { fontSize: 12, color: "#6B7280", marginTop: 4 },
+  fareResultRoute:   { fontSize: 13, color: "#6B7280", fontWeight: "600", marginBottom: 4 },
+  fareResultAmount:  { fontSize: 36, fontWeight: "900", color: "#15803d" },
+  fareResultNote:    { fontSize: 12, color: "#6B7280", marginTop: 4 },
 
-  passengerPanel: { position: "absolute", bottom: 20, left: 16, right: 16, zIndex: 40 },
-  rideRequestBtn: {
+  passengerPanel:      { position: "absolute", bottom: 20, left: 16, right: 16, zIndex: 40 },
+  rideRequestBtn:      {
     backgroundColor: "#0b600f", borderRadius: 18, paddingVertical: 16,
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
     shadowColor: "#04350a", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 10, elevation: 8,
@@ -1454,48 +1461,48 @@ const styles = StyleSheet.create({
   cancelRequestBtn:    { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: "#FEE2E2", borderRadius: 12, paddingVertical: 10 },
   cancelRequestText:   { color: "#DC2626", fontWeight: "700", fontSize: 14 },
 
-  driverPanel:     { position: "absolute", bottom: 20, left: 16, right: 16 },
-  activeTripCard:  { backgroundColor: "white", borderRadius: 20, padding: 20, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 16, elevation: 8 },
-  tripHeader:      { flexDirection: "row", alignItems: "center", marginBottom: 16 },
+  driverPanel:      { position: "absolute", bottom: 20, left: 16, right: 16 },
+  activeTripCard:   { backgroundColor: "white", borderRadius: 20, padding: 20, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 16, elevation: 8 },
+  tripHeader:       { flexDirection: "row", alignItems: "center", marginBottom: 16 },
   tripIconContainer:{ width: 48, height: 48, borderRadius: 24, backgroundColor: "#D1FAE5", alignItems: "center", justifyContent: "center", marginRight: 12 },
-  tripLabel:       { fontSize: 12, color: "#6B7280", fontWeight: "600", textTransform: "uppercase" },
-  tripDestination: { fontSize: 18, fontWeight: "700", color: "#1F2937" },
-  statusButtonsRow:{ flexDirection: "row", gap: 12, marginBottom: 16 },
-  statusButton:    { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 18, borderRadius: 14, gap: 8, borderWidth: 2, borderColor: "#E5E7EB" },
+  tripLabel:        { fontSize: 12, color: "#6B7280", fontWeight: "600", textTransform: "uppercase" },
+  tripDestination:  { fontSize: 18, fontWeight: "700", color: "#1F2937" },
+  statusButtonsRow: { flexDirection: "row", gap: 12, marginBottom: 16 },
+  statusButton:     { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 18, borderRadius: 14, gap: 8, borderWidth: 2, borderColor: "#E5E7EB" },
   statusButtonActive:    { borderColor: "#15803d" },
   availableButton:       { backgroundColor: "#F0FDF4" },
   fullButton:            { backgroundColor: "#FEF2F2" },
   statusButtonText:      { fontSize: 15, fontWeight: "700", color: "#6B7280" },
   statusButtonTextActive:{ color: "#1F2937" },
-  endTripBtn:      { backgroundColor: "#FEE2E2", borderRadius: 14, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
-  endTripText:     { color: "#DC2626", fontWeight: "700", fontSize: 15 },
-  startTripCard:   { backgroundColor: "white", borderRadius: 20, padding: 20, shadowColor: "#000", shadowOpacity: 0.15, elevation: 8 },
-  startTripContent:{ flexDirection: "row", alignItems: "center" },
+  endTripBtn:       { backgroundColor: "#FEE2E2", borderRadius: 14, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  endTripText:      { color: "#DC2626", fontWeight: "700", fontSize: 15 },
+  startTripCard:    { backgroundColor: "white", borderRadius: 20, padding: 20, shadowColor: "#000", shadowOpacity: 0.15, elevation: 8 },
+  startTripContent: { flexDirection: "row", alignItems: "center" },
   startIconContainer:{ width: 56, height: 56, borderRadius: 28, backgroundColor: "#15803d", alignItems: "center", justifyContent: "center", marginRight: 16 },
-  startTripTitle:  { fontSize: 18, fontWeight: "700" },
+  startTripTitle:   { fontSize: 18, fontWeight: "700" },
   startTripSubtitle:{ fontSize: 14, color: "#6B7280" },
-  arrowContainer:  { width: 32, height: 32, borderRadius: 16, backgroundColor: "#15803d", alignItems: "center", justifyContent: "center" },
+  arrowContainer:   { width: 32, height: 32, borderRadius: 16, backgroundColor: "#15803d", alignItems: "center", justifyContent: "center" },
 
   departureBanner: { position: "absolute", top: 0, left: 0, right: 0, backgroundColor: "#15803d", flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 14, paddingTop: Platform.OS === "ios" ? 52 : 14, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 10, zIndex: 999 },
-  departureBannerIcon:{ width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
+  departureBannerIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
   departureBannerTitle:{ color: "#fff", fontWeight: "700", fontSize: 14 },
   departureBannerMsg:  { color: "rgba(255,255,255,0.9)", fontSize: 12, marginTop: 2 },
 
-  sheetOverlay:     { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end", zIndex: 100 },
-  jeepInfoSheet:    { backgroundColor: "white", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40, shadowColor: "#000", shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.12, shadowRadius: 16, elevation: 20 },
-  sheetHandle:      { width: 40, height: 5, backgroundColor: "#E5E7EB", borderRadius: 3, alignSelf: "center", marginBottom: 20 },
-  sheetTitle:       { fontSize: 20, fontWeight: "800", color: "#111827" },
-  sheetRow:         { flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#F3F4F6" },
-  sheetIconBox:     { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-  sheetRowLabel:    { fontSize: 11, color: "#9CA3AF", fontWeight: "600", textTransform: "uppercase", marginBottom: 2 },
-  sheetRowValue:    { fontSize: 16, fontWeight: "700", color: "#1F2937" },
+  sheetOverlay:    { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end", zIndex: 100 },
+  jeepInfoSheet:   { backgroundColor: "white", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40, shadowColor: "#000", shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.12, shadowRadius: 16, elevation: 20 },
+  sheetHandle:     { width: 40, height: 5, backgroundColor: "#E5E7EB", borderRadius: 3, alignSelf: "center", marginBottom: 20 },
+  sheetTitle:      { fontSize: 20, fontWeight: "800", color: "#111827" },
+  sheetRow:        { flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#F3F4F6" },
+  sheetIconBox:    { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  sheetRowLabel:   { fontSize: 11, color: "#9CA3AF", fontWeight: "600", textTransform: "uppercase", marginBottom: 2 },
+  sheetRowValue:   { fontSize: 16, fontWeight: "700", color: "#1F2937" },
   sheetDriverHeader:{ flexDirection: "row", alignItems: "center", marginBottom: 20 },
   sheetDriverAvatar:{ width: 60, height: 60, borderRadius: 30, borderWidth: 2, borderColor: "#E5E7EB" },
   sheetDriverAvatarFallback:{ width: 60, height: 60, borderRadius: 30, backgroundColor: "#F3F4F6", alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "#E5E7EB" },
-  sheetDriverPlate: { fontSize: 13, color: "#6B7280", fontWeight: "600", marginTop: 2 },
-  fullBadge:        { marginLeft: "auto", backgroundColor: "#FEE2E2", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
-  fullBadgeText:    { color: "#DC2626", fontWeight: "800", fontSize: 12 },
-  sheetCloseBtn:    { marginTop: 20, backgroundColor: "#F3F4F6", borderRadius: 14, paddingVertical: 16, alignItems: "center" },
+  sheetDriverPlate:{ fontSize: 13, color: "#6B7280", fontWeight: "600", marginTop: 2 },
+  fullBadge:       { marginLeft: "auto", backgroundColor: "#FEE2E2", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
+  fullBadgeText:   { color: "#DC2626", fontWeight: "800", fontSize: 12 },
+  sheetCloseBtn:   { marginTop: 20, backgroundColor: "#F3F4F6", borderRadius: 14, paddingVertical: 16, alignItems: "center" },
   sheetCloseBtnText:{ color: "#374151", fontWeight: "700", fontSize: 15 },
 
   modalOverlay:    { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
