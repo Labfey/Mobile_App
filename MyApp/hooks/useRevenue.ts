@@ -1,183 +1,99 @@
 import { useEffect, useState, useCallback } from "react";
 import { ref, onValue, push, update } from "firebase/database";
 import { db } from "../services/firebase";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TYPES
-// ─────────────────────────────────────────────────────────────────────────────
+import { FareGroup } from "../components/PassengerCountModal";
 
 export type Route = "Balacbac–Town" | "Town–Balacbac";
 
 export interface RevenueEntry {
-  id: string;
-  driverId: string;
-  driverName: string;
-  amount: number;
-  passengerCount: number;
-  farePerPassenger: number;
-  route: Route;
-  timestamp: number;
-  date: string; // "YYYY-MM-DD"
-  tripId: string;
+    id: string;
+    driverId: string;
+    driverName: string;
+    amount: number;
+    passengerCount: number;
+    groups: FareGroup[];
+    route: Route;
+    timestamp: number;
+    date: string;
+    tripId: string;
 }
 
 export type DateFilter = "today" | "week" | "month" | "all";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FARE CALCULATION
-// Base fares from your existing getZoneFare logic in mapscreen.tsx
-// Full route (all zones) = ₱20. We use passengerCount * farePerPassenger.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function calculateRevenue(
-  passengerCount: number,
-  farePerPassenger: number = 20
-): number {
-  return passengerCount * farePerPassenger;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// WRITE — call this when a trip ends (from mapscreen.tsx endTripSilent / endTrip)
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function recordTripRevenue({
-  driverId,
-  driverName,
-  passengerCount,
-  farePerPassenger = 20,
-  route,
-  tripId,
+    driverId, driverName, groups, route, tripId,
 }: {
-  driverId: string;
-  driverName: string;
-  passengerCount: number;
-  farePerPassenger?: number;
-  route: Route;
-  tripId: string;
+    driverId: string;
+    driverName: string;
+    groups: FareGroup[];
+    route: Route;
+    tripId: string;
 }): Promise<void> {
-  const amount = calculateRevenue(passengerCount, farePerPassenger);
-  const now = new Date();
-  const date = now.toISOString().split("T")[0];
-
-  const entryRef = push(ref(db, "revenue"));
-  await update(entryRef, {
-    driverId,
-    driverName,
-    amount,
-    passengerCount,
-    farePerPassenger,
-    route,
-    timestamp: Date.now(),
-    date,
-    tripId,
-  });
+    const amount         = groups.reduce((s, g) => s + g.passengerCount * g.farePerPassenger, 0);
+    const passengerCount = groups.reduce((s, g) => s + g.passengerCount, 0);
+    const date           = new Date().toISOString().split("T")[0];
+    const entryRef       = push(ref(db, "revenue"));
+    await update(entryRef, { driverId, driverName, amount, passengerCount, groups, route, timestamp: Date.now(), date, tripId });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DATE HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function getTodayString(): string {
-  return new Date().toISOString().split("T")[0];
-}
-
-export function getWeekStartString(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 6);
-  return d.toISOString().split("T")[0];
-}
-
-export function getMonthStartString(): string {
-  const d = new Date();
-  d.setDate(1);
-  return d.toISOString().split("T")[0];
-}
+export function getTodayString()     { return new Date().toISOString().split("T")[0]; }
+export function getWeekStartString() { const d = new Date(); d.setDate(d.getDate()-6); return d.toISOString().split("T")[0]; }
+export function getMonthStartString(){ const d = new Date(); d.setDate(1); return d.toISOString().split("T")[0]; }
 
 function getStartForFilter(filter: DateFilter): string | null {
-  if (filter === "today") return getTodayString();
-  if (filter === "week") return getWeekStartString();
-  if (filter === "month") return getMonthStartString();
-  return null; // "all" — no start bound
+    if (filter === "today") return getTodayString();
+    if (filter === "week")  return getWeekStartString();
+    if (filter === "month") return getMonthStartString();
+    return null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AGGREGATION
-// ─────────────────────────────────────────────────────────────────────────────
-
 export interface RevenueStats {
-  total: number;
-  tripCount: number;
-  totalPassengers: number;
-  avgPerTrip: number;
-  byDriver: Record<string, { name: string; total: number; trips: number }>;
-  byDate: Record<string, number>; // date string → revenue
+    total: number; tripCount: number; totalPassengers: number; avgPerTrip: number;
+    byDriver: Record<string, { name: string; total: number; trips: number; passengers: number }>;
+    byDate: Record<string, number>;
 }
 
 export function aggregateRevenue(entries: RevenueEntry[]): RevenueStats {
-  const byDriver: RevenueStats["byDriver"] = {};
-  const byDate: RevenueStats["byDate"] = {};
-  let total = 0;
-  let totalPassengers = 0;
-
-  for (const e of entries) {
-    total += e.amount;
-    totalPassengers += e.passengerCount;
-
-    if (!byDriver[e.driverId]) {
-      byDriver[e.driverId] = { name: e.driverName, total: 0, trips: 0 };
+    const byDriver: RevenueStats["byDriver"] = {};
+    const byDate: RevenueStats["byDate"] = {};
+    let total = 0, totalPassengers = 0;
+    for (const e of entries) {
+        total += e.amount; totalPassengers += e.passengerCount;
+        byDate[e.date] = (byDate[e.date] ?? 0) + e.amount;
+        if (!byDriver[e.driverId]) byDriver[e.driverId] = { name: e.driverName, total: 0, trips: 0, passengers: 0 };
+        byDriver[e.driverId].total      += e.amount;
+        byDriver[e.driverId].trips      += 1;
+        byDriver[e.driverId].passengers += e.passengerCount;
     }
-    byDriver[e.driverId].total += e.amount;
-    byDriver[e.driverId].trips += 1;
-
-    byDate[e.date] = (byDate[e.date] ?? 0) + e.amount;
-  }
-
-  return {
-    total,
-    tripCount: entries.length,
-    totalPassengers,
-    avgPerTrip: entries.length > 0 ? Math.round(total / entries.length) : 0,
-    byDriver,
-    byDate,
-  };
+    return { total, tripCount: entries.length, totalPassengers, avgPerTrip: entries.length > 0 ? Math.round(total / entries.length) : 0, byDriver, byDate };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HOOK — for admin dashboard
-// ─────────────────────────────────────────────────────────────────────────────
-
 export function useRevenue(filter: DateFilter = "week") {
-  const [allEntries, setAllEntries] = useState<RevenueEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+    const [allEntries, setAllEntries] = useState<RevenueEntry[]>([]);
+    const [loading, setLoading] = useState(true);
+    useEffect(() => {
+        const unsub = onValue(ref(db, "revenue"), (snap) => {
+            if (!snap.exists()) { setAllEntries([]); setLoading(false); return; }
+            const raw = snap.val() as Record<string, Omit<RevenueEntry, "id">>;
+            setAllEntries(Object.entries(raw).map(([id, v]) => ({ id, ...v })).sort((a, b) => b.timestamp - a.timestamp));
+            setLoading(false);
+        });
+        return () => unsub();
+    }, []);
+    const filtered = useCallback(() => {
+        const start = getStartForFilter(filter);
+        return start ? allEntries.filter(e => e.date >= start) : allEntries;
+    }, [allEntries, filter]);
+    const entries = filtered();
+    return { entries, stats: aggregateRevenue(entries), loading, allEntries };
+}
 
-  // Live listener
-  useEffect(() => {
-    const revenueRef = ref(db, "revenue");
-    const unsub = onValue(revenueRef, (snap) => {
-      if (!snap.exists()) {
-        setAllEntries([]);
-        setLoading(false);
-        return;
-      }
-      const raw = snap.val() as Record<string, Omit<RevenueEntry, "id">>;
-      const list: RevenueEntry[] = Object.entries(raw)
-        .map(([id, val]) => ({ id, ...val }))
-        .sort((a, b) => b.timestamp - a.timestamp);
-      setAllEntries(list);
-      setLoading(false);
-    });
-    return () => unsub();
-  }, []);
-
-  // Filter entries by date range
-  const filtered = useCallback((): RevenueEntry[] => {
-    const start = getStartForFilter(filter);
-    if (!start) return allEntries;
-    return allEntries.filter((e) => e.date >= start);
-  }, [allEntries, filter]);
-
-  const entries = filtered();
-  const stats = aggregateRevenue(entries);
-
-  return { entries, stats, loading, allEntries };
+export function useDriverRevenue(driverId: string, filter: DateFilter = "today") {
+    const { allEntries, loading } = useRevenue("all");
+    const filtered = useCallback(() => {
+        const start = getStartForFilter(filter);
+        return allEntries.filter(e => e.driverId === driverId && (start ? e.date >= start : true));
+    }, [allEntries, driverId, filter]);
+    const entries = filtered();
+    return { entries, stats: aggregateRevenue(entries), loading };
 }

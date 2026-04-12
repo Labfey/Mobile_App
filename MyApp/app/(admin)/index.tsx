@@ -3,32 +3,22 @@ import React, { useEffect, useState, useCallback } from "react";
 import {
     View, Text, ScrollView, TouchableOpacity,
     StyleSheet, ActivityIndicator, RefreshControl,
-    Modal, Dimensions, Pressable,
+    Modal, Dimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import {
     Bus, Users, CheckCircle, XCircle, LogOut, TrendingUp,
-    X, ChevronRight, DollarSign, Clock, FileText, BarChart2
+    X, ChevronRight, Clock, FileText, DollarSign,
 } from "lucide-react-native";
 import { auth, db, ref, onValue, signOut } from "../../services/firebase";
+import { useDriverRevenue, DateFilter } from "../../hooks/useRevenue";
 
-const { height: SCREEN_H, width: SCREEN_W } = Dimensions.get("window");
+const { height: SCREEN_H } = Dimensions.get("window");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
-
-interface RevenueEntry {
-    id: string;
-    driverId: string;
-    driverName: string;
-    amount: number;
-    passengerCount: number;
-    route: string;
-    timestamp: number;
-    date: string;
-}
 
 interface PendingRegistration {
     uid: string;
@@ -39,21 +29,16 @@ interface PendingRegistration {
     submittedAt: number;
 }
 
-type RevenueFilter = "today" | "week" | "month";
+interface JeepItem {
+    uid: string;
+    status: string;
+    latitude?: number;
+    longitude?: number;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DATE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-
-function todayStr()      { return new Date().toISOString().split("T")[0]; }
-function weekStartStr()  { const d = new Date(); d.setDate(d.getDate()-6); return d.toISOString().split("T")[0]; }
-function monthStartStr() { const d = new Date(); d.setDate(1); return d.toISOString().split("T")[0]; }
-
-function getStartForFilter(f: RevenueFilter): string {
-    if (f === "today") return todayStr();
-    if (f === "week")  return weekStartStr();
-    return monthStartStr();
-}
 
 function timeAgo(ts: number): string {
     const diff = Date.now() - ts;
@@ -67,73 +52,29 @@ function timeAgo(ts: number): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MINI BAR CHART
-// Renders a simple horizontal bar for a daily breakdown row.
+// JEEP REVENUE MODAL
+// Opens when admin taps a jeep card; shows that driver's revenue entries.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function MiniBar({ value, max }: { value: number; max: number }) {
-    const pct = max > 0 ? Math.max(0.03, value / max) : 0.03;
-    return (
-        <View style={s.barTrack}>
-            <View style={[s.barFill, { width: `${pct * 100}%` as any }]} />
-        </View>
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REVENUE DETAIL MODAL
-//
-// State: revenueFilter (today|week|month) — toggling it re-filters allRevenue
-//        locally; no extra Firebase call needed since allRevenue is already
-//        loaded in the parent.
-//
-// Data flow:
-//   allRevenue (full list from Firebase)
-//     → filtered by date using getStartForFilter(revenueFilter)
-//     → aggregated to total, byDate, byDriver in one .reduce() pass
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface RevenueModalProps {
+interface JeepRevenueModalProps {
     visible: boolean;
     onClose: () => void;
-    allRevenue: RevenueEntry[];
+    driverId: string;
+    driverName: string;
+    plate: string;
+    route: string;
 }
 
-function RevenueDetailModal({ visible, onClose, allRevenue }: RevenueModalProps) {
-    // Local filter state — only lives inside this modal
-    const [filter, setFilter] = useState<RevenueFilter>("week");
+const REVENUE_TABS: { k: DateFilter; l: string }[] = [
+    { k: "today", l: "Today" },
+    { k: "week",  l: "Week"  },
+    { k: "month", l: "Month" },
+    { k: "all",   l: "All"   },
+];
 
-    // Derived data: recomputed whenever filter or allRevenue changes
-    const filtered = allRevenue.filter(e => e.date >= getStartForFilter(filter));
-
-    // Single-pass aggregation
-    const { total, byDate, byDriver, tripCount, totalPax } = filtered.reduce(
-        (acc, e) => {
-            acc.total    += e.amount;
-            acc.tripCount += 1;
-            acc.totalPax  += e.passengerCount ?? 0;
-            acc.byDate[e.date] = (acc.byDate[e.date] ?? 0) + e.amount;
-            if (!acc.byDriver[e.driverId]) {
-                acc.byDriver[e.driverId] = { name: e.driverName, total: 0, trips: 0 };
-            }
-            acc.byDriver[e.driverId].total  += e.amount;
-            acc.byDriver[e.driverId].trips  += 1;
-            return acc;
-        },
-        { total: 0, tripCount: 0, totalPax: 0,
-          byDate: {} as Record<string, number>,
-          byDriver: {} as Record<string, { name: string; total: number; trips: number }> }
-    );
-
-    const maxDay      = Math.max(1, ...Object.values(byDate));
-    const sortedDates = Object.entries(byDate).sort((a, b) => b[0].localeCompare(a[0]));
-    const topDrivers  = Object.entries(byDriver).sort((a, b) => b[1].total - a[1].total);
-
-    const FILTER_TABS: { key: RevenueFilter; label: string }[] = [
-        { key: "today", label: "Today" },
-        { key: "week",  label: "7 Days" },
-        { key: "month", label: "Month"  },
-    ];
+function JeepRevenueModal({ visible, onClose, driverId, driverName, plate, route }: JeepRevenueModalProps) {
+    const [filter, setFilter] = useState<DateFilter>("today");
+    const { entries, stats, loading } = useDriverRevenue(driverId, filter);
 
     return (
         <Modal visible={visible} animationType="slide" transparent>
@@ -141,102 +82,92 @@ function RevenueDetailModal({ visible, onClose, allRevenue }: RevenueModalProps)
                 <View style={[s.modalSheet, { height: SCREEN_H * 0.88 }]}>
                     <View style={s.sheetHandle} />
 
-                    {/* Modal header */}
+                    {/* Header */}
                     <View style={s.modalHeaderRow}>
                         <View style={s.modalHeaderIcon}>
-                            <DollarSign color="#15803d" size={22} />
+                            <Bus color="#15803d" size={22} />
                         </View>
                         <View style={{ flex: 1 }}>
-                            <Text style={s.modalTitle}>Revenue Breakdown</Text>
-                            <Text style={s.modalSub}>{tripCount} trips · {totalPax} passengers</Text>
+                            <Text style={s.modalTitle}>{driverName}</Text>
+                            <Text style={s.modalSub}>{plate} · {route}</Text>
                         </View>
                         <TouchableOpacity onPress={onClose} style={s.closeBtn}>
                             <X color="#6b7280" size={20} />
                         </TouchableOpacity>
                     </View>
 
-                    {/* Filter tabs
-                        State: filter (local to this modal)
-                        Toggling a tab sets filter → filtered list recomputes → UI updates */}
-                    <View style={s.filterRow}>
-                        {FILTER_TABS.map(tab => (
+                    {/* Filter tabs */}
+                    <View style={s.filterTabs}>
+                        {REVENUE_TABS.map(t => (
                             <TouchableOpacity
-                                key={tab.key}
-                                onPress={() => setFilter(tab.key)}
-                                style={[s.filterTab, filter === tab.key && s.filterTabActive]}
-                                activeOpacity={0.7}
+                                key={t.k}
+                                onPress={() => setFilter(t.k)}
+                                style={[s.filterTab, filter === t.k && s.filterTabActive]}
                             >
-                                <Text style={[s.filterTabText, filter === tab.key && s.filterTabTextActive]}>
-                                    {tab.label}
+                                <Text style={[s.filterTabTxt, filter === t.k && s.filterTabTxtActive]}>
+                                    {t.l}
                                 </Text>
                             </TouchableOpacity>
                         ))}
                     </View>
 
-                    {/* Total revenue hero */}
-                    <View style={s.heroCard}>
-                        <Text style={s.heroLabel}>Total Revenue</Text>
-                        <Text style={s.heroAmount}>₱{total.toLocaleString()}</Text>
-                        <Text style={s.heroSub}>
-                            avg ₱{tripCount > 0 ? Math.round(total / tripCount) : 0} per trip
-                        </Text>
-                    </View>
-
-                    <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
-
-                        {/* Daily bar chart */}
-                        {sortedDates.length > 0 && (
-                            <View style={s.section}>
-                                <Text style={s.sectionTitle}>Daily Breakdown</Text>
-                                {sortedDates.map(([date, amount]) => (
-                                    <View key={date} style={s.dayRow}>
-                                        <Text style={s.dayLabel}>
-                                            {new Date(date + "T00:00:00").toLocaleDateString("en-PH", {
-                                                weekday: "short", month: "short", day: "numeric",
-                                            })}
-                                        </Text>
-                                        <View style={{ flex: 1, marginHorizontal: 12 }}>
-                                            <MiniBar value={amount} max={maxDay} />
-                                        </View>
-                                        <Text style={s.dayAmount}>₱{amount.toLocaleString()}</Text>
-                                    </View>
-                                ))}
+                    {loading ? (
+                        <ActivityIndicator color="#15803d" style={{ marginTop: 24 }} />
+                    ) : (
+                        <>
+                            {/* Summary cards */}
+                            <View style={s.summaryRow}>
+                                <View style={[s.summaryCard, { backgroundColor: "#f0fdf4" }]}>
+                                    <Text style={s.summaryAmt}>₱{stats.total.toLocaleString()}</Text>
+                                    <Text style={s.summaryLbl}>Revenue</Text>
+                                </View>
+                                <View style={[s.summaryCard, { backgroundColor: "#eff6ff" }]}>
+                                    <Text style={[s.summaryAmt, { color: "#2563eb" }]}>{stats.tripCount}</Text>
+                                    <Text style={s.summaryLbl}>Trips</Text>
+                                </View>
+                                <View style={[s.summaryCard, { backgroundColor: "#fefce8" }]}>
+                                    <Text style={[s.summaryAmt, { color: "#d97706" }]}>{stats.totalPassengers}</Text>
+                                    <Text style={s.summaryLbl}>Passengers</Text>
+                                </View>
+                                <View style={[s.summaryCard, { backgroundColor: "#f0fdf4" }]}>
+                                    <Text style={s.summaryAmt}>₱{stats.avgPerTrip}</Text>
+                                    <Text style={s.summaryLbl}>Avg/Trip</Text>
+                                </View>
                             </View>
-                        )}
 
-                        {/* Driver leaderboard */}
-                        {topDrivers.length > 0 && (
-                            <View style={s.section}>
-                                <Text style={s.sectionTitle}>Driver Earnings</Text>
-                                {topDrivers.map(([uid, d], i) => (
-                                    <View key={uid} style={s.driverRow}>
-                                        <View style={[s.rankBadge,
-                                            i === 0 && { backgroundColor: "#fef9c3" },
-                                            i === 1 && { backgroundColor: "#f1f5f9" },
-                                            i === 2 && { backgroundColor: "#fef3c7" },
-                                        ]}>
-                                            <Text style={s.rankText}>{i + 1}</Text>
-                                        </View>
-                                        <View style={{ flex: 1 }}>
-                                            <View style={s.driverRowTop}>
-                                                <Text style={s.driverRowName} numberOfLines={1}>{d.name}</Text>
-                                                <Text style={s.driverRowAmount}>₱{d.total.toLocaleString()}</Text>
+                            {/* Revenue entries list */}
+                            <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+                                {entries.length === 0 ? (
+                                    <View style={s.emptyBox}>
+                                        <Text style={s.emptyIcon}>💰</Text>
+                                        <Text style={s.emptyText}>No revenue recorded for this period.</Text>
+                                    </View>
+                                ) : (
+                                    entries.map(e => (
+                                        <View key={e.id} style={s.revenueRow}>
+                                            <View style={s.revenueRowDot} />
+                                            <View style={{ flex: 1 }}>
+                                                <Text style={s.revenueRoute}>{e.route}</Text>
+                                                <Text style={s.revenueMeta}>
+                                                    {e.passengerCount} pax ·{" "}
+                                                    {new Date(e.timestamp).toLocaleDateString("en-PH", {
+                                                        month: "short", day: "numeric",
+                                                        hour: "2-digit", minute: "2-digit",
+                                                    })}
+                                                </Text>
+                                                {e.groups && e.groups.length > 0 && (
+                                                    <Text style={s.revenueGroups}>
+                                                        {e.groups.map((g: any) => `${g.passengerCount}×₱${g.farePerPassenger}`).join("  +  ")}
+                                                    </Text>
+                                                )}
                                             </View>
-                                            <MiniBar value={d.total} max={topDrivers[0][1].total} />
-                                            <Text style={s.driverRowSub}>{d.trips} trip{d.trips !== 1 ? "s" : ""}</Text>
+                                            <Text style={s.revenueAmt}>₱{e.amount}</Text>
                                         </View>
-                                    </View>
-                                ))}
-                            </View>
-                        )}
-
-                        {filtered.length === 0 && (
-                            <View style={s.emptyBox}>
-                                <Text style={s.emptyIcon}>📊</Text>
-                                <Text style={s.emptyText}>No revenue data for this period.</Text>
-                            </View>
-                        )}
-                    </ScrollView>
+                                    ))
+                                )}
+                            </ScrollView>
+                        </>
+                    )}
                 </View>
             </View>
         </Modal>
@@ -245,10 +176,6 @@ function RevenueDetailModal({ visible, onClose, allRevenue }: RevenueModalProps)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PENDING REGISTRATIONS MODAL
-//
-// State: pendingList is fetched from Firebase once when the modal opens
-//        (via useEffect watching `visible`). This avoids always listening
-//        to the registrations node from the dashboard.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface PendingModalProps {
@@ -261,7 +188,6 @@ function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations
     const [pendingList, setPendingList] = useState<PendingRegistration[]>([]);
     const [loadingPending, setLoadingPending] = useState(false);
 
-    // Fetch when modal opens — live listener so badge stays accurate
     useEffect(() => {
         if (!visible) return;
         setLoadingPending(true);
@@ -330,7 +256,6 @@ function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations
                         </ScrollView>
                     )}
 
-                    {/* Navigate to full registrations tab for approve/reject */}
                     <TouchableOpacity
                         style={s.reviewAllBtn}
                         onPress={() => { onClose(); onNavigateToRegistrations(); }}
@@ -347,47 +272,24 @@ function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN ADMIN DASHBOARD
-//
-// State management summary:
-//   stats          — live jeep/driver counts from Firebase listeners
-//   allRevenue     — full revenue list, passed to RevenueDetailModal
-//   todayRevenue   — derived from allRevenue (today's total shown on card)
-//   pendingCount   — live count of pending registrations for badge
-//   revenueModalVisible  — toggles the revenue breakdown modal
-//   pendingModalVisible  — toggles the pending registrations modal
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function AdminDashboard() {
     const router = useRouter();
 
-    const [loading, setLoading]         = useState(true);
-    const [refreshing, setRefreshing]   = useState(false);
-    const [stats, setStats]             = useState({ totalDrivers: 0, totalJeeps: 0, activeJeeps: 0, inactiveJeeps: 0 });
-    const [jeeps, setJeeps]             = useState<any[]>([]);
-    const [jeepInfo, setJeepInfo]       = useState<Record<string, any>>({});
-    const [allRevenue, setAllRevenue]   = useState<RevenueEntry[]>([]);
+    const [loading, setLoading]           = useState(true);
+    const [refreshing, setRefreshing]     = useState(false);
+    const [stats, setStats]               = useState({ totalDrivers: 0, totalJeeps: 0, activeJeeps: 0, inactiveJeeps: 0 });
+    const [jeeps, setJeeps]               = useState<JeepItem[]>([]);
+    const [jeepInfo, setJeepInfo]         = useState<Record<string, any>>({});
     const [pendingCount, setPendingCount] = useState(0);
 
-    // Modal visibility — each controlled by a single boolean state
-    const [revenueModalVisible, setRevenueModalVisible] = useState(false);
+    // Which jeep card was tapped — drives JeepRevenueModal
+    const [selectedJeep, setSelectedJeep] = useState<JeepItem | null>(null);
     const [pendingModalVisible, setPendingModalVisible] = useState(false);
 
-    // Derived: today's total revenue (displayed on dashboard card)
-    const todayRevenue = allRevenue
-        .filter(e => e.date === todayStr())
-        .reduce((sum, e) => sum + e.amount, 0);
-
-    const weekRevenue = allRevenue
-        .filter(e => e.date >= weekStartStr())
-        .reduce((sum, e) => sum + e.amount, 0);
-
-    // ── FIREBASE LISTENERS ──────────────────────────────────────────────────
-    // All listeners are set up once in fetchData and cleaned up on unmount.
-    // We use onValue (realtime) rather than get() so the dashboard updates live.
-
     const fetchData = useCallback(() => {
-        const jeepsRef = ref(db, "jeeps");
-        onValue(jeepsRef, (snap) => {
+        onValue(ref(db, "jeeps"), (snap) => {
             if (snap.exists()) {
                 const data   = snap.val();
                 const list   = Object.entries(data).map(([uid, val]: any) => ({ uid, ...val }));
@@ -410,18 +312,6 @@ export default function AdminDashboard() {
             }
         });
 
-        // Revenue — loaded once here so it's available for the modal without
-        // a second listener inside the modal component
-        onValue(ref(db, "revenue"), (snap) => {
-            if (!snap.exists()) { setAllRevenue([]); return; }
-            const raw = snap.val() as Record<string, Omit<RevenueEntry, "id">>;
-            const list: RevenueEntry[] = Object.entries(raw)
-                .map(([id, v]) => ({ id, ...v }))
-                .sort((a, b) => b.timestamp - a.timestamp);
-            setAllRevenue(list);
-        });
-
-        // Pending registrations count for badge
         onValue(ref(db, "pending_registrations"), (snap) => {
             if (!snap.exists()) { setPendingCount(0); return; }
             const count = Object.values(snap.val()).filter((r: any) => r.status === "pending").length;
@@ -437,6 +327,8 @@ export default function AdminDashboard() {
     };
 
     const onRefresh = () => { setRefreshing(true); fetchData(); };
+
+    const selectedInfo = selectedJeep ? jeepInfo[selectedJeep.uid] : null;
 
     if (loading) {
         return (
@@ -489,50 +381,24 @@ export default function AdminDashboard() {
                     </View>
                 </View>
 
-                {/* ── CLICKABLE REVENUE CARD ───────────────────────────────────
-                    Pressing this card sets revenueModalVisible = true which
-                    renders the RevenueDetailModal above the current screen.
-                    Pressable gives us the pressed/active visual state via style. */}
+                {/* ── QUICK ACTIONS ────────────────────────────────────────── */}
                 <View style={s.actionSection}>
                     <Text style={s.actionSectionTitle}>Quick Actions</Text>
-
-                    <Pressable
-                        onPress={() => setRevenueModalVisible(true)}
-                        style={({ pressed }) => [s.revenueCard, pressed && s.cardPressed]}
-                    >
-                        <View style={s.revenueCardLeft}>
-                            <View style={s.revenueIconBox}>
-                                <DollarSign color="#15803d" size={22} />
-                            </View>
-                            <View>
-                                <Text style={s.revenueCardTitle}>Revenue Overview</Text>
-                                <Text style={s.revenueCardSub}>Today: ₱{todayRevenue.toLocaleString()}</Text>
-                            </View>
-                        </View>
-                        <View style={s.revenueCardRight}>
-                            <Text style={s.revenueCardWeek}>₱{weekRevenue.toLocaleString()}</Text>
-                            <Text style={s.revenueCardWeekLabel}>this week</Text>
-                            <ChevronRight color="#15803d" size={18} style={{ marginTop: 4 }} />
-                        </View>
-                    </Pressable>
-
-                    {/* ── PENDING REGISTRATIONS BUTTON ────────────────────────
-                        Pressing sets pendingModalVisible = true.
-                        The red badge shows pendingCount from the live listener. */}
-                    <Pressable
+                    <TouchableOpacity
                         onPress={() => setPendingModalVisible(true)}
-                        style={({ pressed }) => [s.pendingCard, pressed && s.cardPressed]}
+                        style={s.pendingCard}
+                        activeOpacity={0.8}
                     >
-                        <View style={s.revenueCardLeft}>
-                            <View style={[s.revenueIconBox, { backgroundColor: "#fef3c7" }]}>
+                        <View style={s.cardLeft}>
+                            <View style={[s.cardIconBox, { backgroundColor: "#fef3c7" }]}>
                                 <FileText color="#d97706" size={22} />
                             </View>
                             <View>
-                                <Text style={s.revenueCardTitle}>Driver Applications</Text>
-                                <Text style={s.revenueCardSub}>Review submitted documents</Text>
+                                <Text style={s.cardTitle}>Driver Applications</Text>
+                                <Text style={s.cardSub}>Review submitted documents</Text>
                             </View>
                         </View>
-                        <View style={s.revenueCardRight}>
+                        <View style={s.cardRight}>
                             {pendingCount > 0 ? (
                                 <View style={s.countBadge}>
                                     <Text style={s.countBadgeText}>{pendingCount}</Text>
@@ -542,7 +408,7 @@ export default function AdminDashboard() {
                             )}
                             <ChevronRight color="#d97706" size={18} style={{ marginTop: 4 }} />
                         </View>
-                    </Pressable>
+                    </TouchableOpacity>
                 </View>
 
                 {/* ── LIVE JEEP STATUS ─────────────────────────────────────── */}
@@ -551,6 +417,7 @@ export default function AdminDashboard() {
                         <TrendingUp color="#15803d" size={18} />
                         <Text style={s.sectionTitle}>Live Jeep Status</Text>
                     </View>
+                    <Text style={s.sectionHint}>Tap a jeep to view its revenue</Text>
 
                     {jeeps.length === 0 ? (
                         <Text style={s.emptyText}>No jeeps found.</Text>
@@ -559,38 +426,51 @@ export default function AdminDashboard() {
                             const info     = jeepInfo[jeep.uid];
                             const isActive = jeep.status === "available";
                             return (
-                                <View key={jeep.uid} style={s.jeepCard}>
+                                <TouchableOpacity
+                                    key={jeep.uid}
+                                    style={s.jeepCard}
+                                    onPress={() => setSelectedJeep(jeep)}
+                                    activeOpacity={0.75}
+                                >
                                     <View style={[s.statusDot, { backgroundColor: isActive ? "#15803d" : "#9ca3af" }]} />
-                                    <View style={s.jeepInfo}>
+                                    <View style={s.jeepInfoBlock}>
                                         <Text style={s.jeepName}>{info?.driverName ?? "Unknown Driver"}</Text>
                                         <Text style={s.jeepPlate}>{info?.plate ?? "No plate"} · {info?.route ?? "No route"}</Text>
                                         <Text style={s.jeepCoords}>
                                             {jeep.latitude?.toFixed(5)}, {jeep.longitude?.toFixed(5)}
                                         </Text>
                                     </View>
-                                    <View style={[s.statusBadge, { backgroundColor: isActive ? "#dcfce7" : "#f3f4f6" }]}>
-                                        <Text style={[s.statusText, { color: isActive ? "#15803d" : "#6b7280" }]}>
-                                            {isActive ? "Active" : "Inactive"}
-                                        </Text>
+                                    <View style={{ alignItems: "flex-end", gap: 6 }}>
+                                        <View style={[s.statusBadge, { backgroundColor: isActive ? "#dcfce7" : "#f3f4f6" }]}>
+                                            <Text style={[s.statusText, { color: isActive ? "#15803d" : "#6b7280" }]}>
+                                                {isActive ? "Active" : "Inactive"}
+                                            </Text>
+                                        </View>
+                                        <View style={s.revenuePill}>
+                                            <DollarSign color="#15803d" size={11} />
+                                            <Text style={s.revenuePillTxt}>Revenue</Text>
+                                        </View>
                                     </View>
-                                </View>
+                                </TouchableOpacity>
                             );
                         })
                     )}
                 </View>
             </ScrollView>
 
-            {/* ── MODALS ──────────────────────────────────────────────────── */}
+            {/* ── JEEP REVENUE MODAL ───────────────────────────────────────── */}
+            {selectedJeep && (
+                <JeepRevenueModal
+                    visible={!!selectedJeep}
+                    onClose={() => setSelectedJeep(null)}
+                    driverId={selectedJeep.uid}
+                    driverName={selectedInfo?.driverName ?? "Unknown Driver"}
+                    plate={selectedInfo?.plate ?? "No plate"}
+                    route={selectedInfo?.route ?? "No route"}
+                />
+            )}
 
-            {/* Revenue detail modal — receives allRevenue so it can filter locally
-                without touching Firebase again */}
-            <RevenueDetailModal
-                visible={revenueModalVisible}
-                onClose={() => setRevenueModalVisible(false)}
-                allRevenue={allRevenue}
-            />
-
-            {/* Pending registrations modal — fetches its own live slice */}
+            {/* ── PENDING REGISTRATIONS MODAL ──────────────────────────────── */}
             <PendingRegistrationsModal
                 visible={pendingModalVisible}
                 onClose={() => setPendingModalVisible(false)}
@@ -605,9 +485,9 @@ export default function AdminDashboard() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-    container:       { flex: 1, backgroundColor: "#f9fafb" },
-    loadingContainer:{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f9fafb" },
-    loadingText:     { marginTop: 12, color: "#6b7280", fontSize: 14 },
+    container:        { flex: 1, backgroundColor: "#f9fafb" },
+    loadingContainer: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f9fafb" },
+    loadingText:      { marginTop: 12, color: "#6b7280", fontSize: 14 },
 
     header: {
         flexDirection: "row", justifyContent: "space-between", alignItems: "center",
@@ -622,22 +502,13 @@ const s = StyleSheet.create({
         flexDirection: "row", flexWrap: "wrap",
         paddingHorizontal: 16, paddingTop: 20, gap: 12,
     },
-    statCard: { width: "47%", borderRadius: 16, padding: 16, alignItems: "flex-start", gap: 6 },
-    statNumber:{ fontSize: 28, fontWeight: "900", color: "#15803d" },
-    statLabel: { fontSize: 12, color: "#6b7280", fontWeight: "600" },
+    statCard:   { width: "47%", borderRadius: 16, padding: 16, alignItems: "flex-start", gap: 6 },
+    statNumber: { fontSize: 28, fontWeight: "900", color: "#15803d" },
+    statLabel:  { fontSize: 12, color: "#6b7280", fontWeight: "600" },
 
-    // Quick actions section
     actionSection:      { paddingHorizontal: 16, paddingTop: 24, gap: 12 },
     actionSectionTitle: { fontSize: 16, fontWeight: "800", color: "#111827", marginBottom: 4 },
 
-    // Revenue card — Pressable gives active state via `pressed`
-    revenueCard: {
-        backgroundColor: "#fff", borderRadius: 18, padding: 16,
-        flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-        borderWidth: 1, borderColor: "#bbf7d0",
-        shadowColor: "#15803d", shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.08, shadowRadius: 6, elevation: 3,
-    },
     pendingCard: {
         backgroundColor: "#fff", borderRadius: 18, padding: 16,
         flexDirection: "row", alignItems: "center", justifyContent: "space-between",
@@ -645,87 +516,84 @@ const s = StyleSheet.create({
         shadowColor: "#d97706", shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.08, shadowRadius: 6, elevation: 3,
     },
-    // Active/pressed state — slight scale + opacity change
-    cardPressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
-
-    revenueCardLeft:  { flexDirection: "row", alignItems: "center", gap: 12, flex: 1 },
-    revenueCardRight: { alignItems: "flex-end" },
-    revenueIconBox:   { width: 44, height: 44, borderRadius: 14, backgroundColor: "#f0fdf4", alignItems: "center", justifyContent: "center" },
-    revenueCardTitle: { fontSize: 15, fontWeight: "700", color: "#111827" },
-    revenueCardSub:   { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    revenueCardWeek:  { fontSize: 18, fontWeight: "900", color: "#15803d" },
-    revenueCardWeekLabel: { fontSize: 10, color: "#9ca3af", fontWeight: "600" },
+    cardLeft:    { flexDirection: "row", alignItems: "center", gap: 12, flex: 1 },
+    cardRight:   { alignItems: "flex-end" },
+    cardIconBox: { width: 44, height: 44, borderRadius: 14, alignItems: "center", justifyContent: "center" },
+    cardTitle:   { fontSize: 15, fontWeight: "700", color: "#111827" },
+    cardSub:     { fontSize: 12, color: "#6b7280", marginTop: 2 },
 
     countBadge:     { backgroundColor: "#fee2e2", borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, marginBottom: 4 },
     countBadgeText: { color: "#dc2626", fontWeight: "800", fontSize: 13 },
 
-    section:        { marginTop: 24, paddingHorizontal: 16, paddingBottom: 32 },
-    sectionHeader:  { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 },
-    sectionTitle:   { fontSize: 16, fontWeight: "800", color: "#111827" },
+    section:       { marginTop: 24, paddingHorizontal: 16, paddingBottom: 32 },
+    sectionHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 },
+    sectionTitle:  { fontSize: 16, fontWeight: "800", color: "#111827" },
+    sectionHint:   { fontSize: 11, color: "#9ca3af", marginBottom: 12 },
 
     jeepCard: {
         backgroundColor: "#fff", borderRadius: 14, padding: 14,
         flexDirection: "row", alignItems: "center", marginBottom: 10,
         borderWidth: 1, borderColor: "#e5e7eb",
+        shadowColor: "#000", shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.04, shadowRadius: 4, elevation: 2,
     },
-    statusDot:  { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
-    jeepInfo:   { flex: 1 },
-    jeepName:   { fontSize: 15, fontWeight: "700", color: "#111827" },
-    jeepPlate:  { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    jeepCoords: { fontSize: 11, color: "#9ca3af", marginTop: 2 },
-    statusBadge:{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
-    statusText: { fontSize: 12, fontWeight: "700" },
+    statusDot:    { width: 10, height: 10, borderRadius: 5, marginRight: 12, flexShrink: 0 },
+    jeepInfoBlock:{ flex: 1 },
+    jeepName:     { fontSize: 15, fontWeight: "700", color: "#111827" },
+    jeepPlate:    { fontSize: 12, color: "#6b7280", marginTop: 2 },
+    jeepCoords:   { fontSize: 11, color: "#9ca3af", marginTop: 2 },
+    statusBadge:  { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+    statusText:   { fontSize: 12, fontWeight: "700" },
+    revenuePill: {
+        flexDirection: "row", alignItems: "center", gap: 3,
+        backgroundColor: "#f0fdf4", borderRadius: 8,
+        paddingHorizontal: 8, paddingVertical: 3,
+        borderWidth: 1, borderColor: "#bbf7d0",
+    },
+    revenuePillTxt: { fontSize: 10, fontWeight: "700", color: "#15803d" },
 
-    // Modals
+    // ── Modals shared ──
     modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
     modalSheet: {
         backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28,
-        padding: 24, paddingBottom: 40,
+        padding: 20, paddingBottom: 40,
     },
-    sheetHandle: { width: 40, height: 5, backgroundColor: "#e5e7eb", borderRadius: 3, alignSelf: "center", marginBottom: 20 },
-    modalHeaderRow:  { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 20 },
+    sheetHandle:     { width: 40, height: 5, backgroundColor: "#e5e7eb", borderRadius: 3, alignSelf: "center", marginBottom: 16 },
+    modalHeaderRow:  { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 14 },
     modalHeaderIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: "#f0fdf4", alignItems: "center", justifyContent: "center" },
-    modalTitle:  { fontSize: 19, fontWeight: "800", color: "#111827" },
-    modalSub:    { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    closeBtn:    { padding: 8, backgroundColor: "#f3f4f6", borderRadius: 12 },
+    modalTitle:      { fontSize: 18, fontWeight: "800", color: "#111827" },
+    modalSub:        { fontSize: 12, color: "#6b7280", marginTop: 2 },
+    closeBtn:        { padding: 8, backgroundColor: "#f3f4f6", borderRadius: 12 },
 
-    filterRow: { flexDirection: "row", backgroundColor: "#f3f4f6", borderRadius: 14, padding: 4, marginBottom: 16, gap: 4 },
-    filterTab:           { flex: 1, paddingVertical: 10, borderRadius: 11, alignItems: "center" },
-    filterTabActive:     { backgroundColor: "#15803d" },
-    filterTabText:       { fontSize: 13, fontWeight: "700", color: "#6b7280" },
-    filterTabTextActive: { color: "white" },
+    // Revenue modal — filter tabs
+    filterTabs:         { flexDirection: "row", backgroundColor: "#f3f4f6", borderRadius: 12, padding: 4, marginBottom: 14, gap: 4 },
+    filterTab:          { flex: 1, paddingVertical: 8, borderRadius: 9, alignItems: "center" },
+    filterTabActive:    { backgroundColor: "#15803d" },
+    filterTabTxt:       { fontSize: 12, fontWeight: "700", color: "#6b7280" },
+    filterTabTxtActive: { color: "white" },
 
-    heroCard: { backgroundColor: "#f0fdf4", borderRadius: 18, padding: 20, alignItems: "center", marginBottom: 20 },
-    heroLabel:  { fontSize: 12, fontWeight: "700", color: "#6b7280", textTransform: "uppercase" },
-    heroAmount: { fontSize: 40, fontWeight: "900", color: "#15803d", marginTop: 4 },
-    heroSub:    { fontSize: 12, color: "#9ca3af", marginTop: 4 },
+    // Revenue modal — summary row
+    summaryRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
+    summaryCard:{ flex: 1, borderRadius: 12, padding: 10, alignItems: "center" },
+    summaryAmt: { fontSize: 16, fontWeight: "900", color: "#15803d" },
+    summaryLbl: { fontSize: 9, fontWeight: "700", color: "#9ca3af", textTransform: "uppercase", marginTop: 2 },
 
-    section2:      { marginBottom: 24 },
-    sectionTitle2: { fontSize: 15, fontWeight: "800", color: "#111827", marginBottom: 12 },
+    // Revenue entry rows
+    revenueRow:    { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10, borderTopWidth: 1, borderTopColor: "#f3f4f6" },
+    revenueRowDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: "#15803d", flexShrink: 0 },
+    revenueRoute:  { fontSize: 13, fontWeight: "700", color: "#111827" },
+    revenueMeta:   { fontSize: 11, color: "#6b7280", marginTop: 1 },
+    revenueGroups: { fontSize: 10, color: "#9ca3af", marginTop: 2 },
+    revenueAmt:    { fontSize: 15, fontWeight: "900", color: "#15803d" },
 
-    dayRow:    { flexDirection: "row", alignItems: "center", marginBottom: 10 },
-    dayLabel:  { fontSize: 12, fontWeight: "600", color: "#374151", width: 88 },
-    dayAmount: { fontSize: 13, fontWeight: "800", color: "#15803d", width: 68, textAlign: "right" },
-
-    barTrack: { height: 6, backgroundColor: "#f3f4f6", borderRadius: 3, overflow: "hidden", flex: 1 },
-    barFill:  { height: 6, backgroundColor: "#15803d", borderRadius: 3 },
-
-    driverRow:    { backgroundColor: "#fff", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8, borderWidth: 1, borderColor: "#e5e7eb" },
-    rankBadge:    { width: 28, height: 28, borderRadius: 14, backgroundColor: "#f3f4f6", alignItems: "center", justifyContent: "center" },
-    rankText:     { fontSize: 12, fontWeight: "800", color: "#374151" },
-    driverRowTop: { flexDirection: "row", justifyContent: "space-between", marginBottom: 6 },
-    driverRowName:   { fontSize: 14, fontWeight: "700", color: "#111827", flex: 1, marginRight: 8 },
-    driverRowAmount: { fontSize: 15, fontWeight: "900", color: "#15803d" },
-    driverRowSub:    { fontSize: 11, color: "#9ca3af", marginTop: 4 },
-
-    // Pending registrations
-    regCard:   { backgroundColor: "#fff", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8, borderWidth: 1, borderColor: "#e5e7eb" },
-    regAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: "#fef3c7", alignItems: "center", justifyContent: "center" },
+    // Pending modal
+    regCard:       { backgroundColor: "#fff", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8, borderWidth: 1, borderColor: "#e5e7eb" },
+    regAvatar:     { width: 44, height: 44, borderRadius: 22, backgroundColor: "#fef3c7", alignItems: "center", justifyContent: "center" },
     regAvatarText: { fontSize: 18, fontWeight: "800", color: "#d97706" },
-    regName:   { fontSize: 15, fontWeight: "700", color: "#111827" },
-    regEmail:  { fontSize: 12, color: "#6b7280", marginTop: 1 },
-    regMeta:   { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 },
-    regTime:   { fontSize: 10, color: "#9ca3af" },
+    regName:       { fontSize: 15, fontWeight: "700", color: "#111827" },
+    regEmail:      { fontSize: 12, color: "#6b7280", marginTop: 1 },
+    regMeta:       { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 },
+    regTime:       { fontSize: 10, color: "#9ca3af" },
     pendingBadge:     { backgroundColor: "#fef3c7", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
     pendingBadgeText: { color: "#d97706", fontSize: 11, fontWeight: "700" },
 
@@ -735,7 +603,7 @@ const s = StyleSheet.create({
     },
     reviewAllText: { color: "white", fontWeight: "800", fontSize: 15 },
 
-    emptyBox: { alignItems: "center", paddingVertical: 40, gap: 8 },
+    emptyBox:  { alignItems: "center", paddingVertical: 40, gap: 8 },
     emptyIcon: { fontSize: 36 },
     emptyText: { color: "#9ca3af", fontWeight: "600", fontSize: 14, textAlign: "center", marginTop: 20 },
 });

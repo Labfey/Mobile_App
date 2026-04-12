@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   View, StyleSheet, Text, TouchableOpacity, Modal, Alert,
-  Animated, Platform, TextInput, KeyboardAvoidingView, Image, ScrollView
+  Animated, Platform, TextInput, KeyboardAvoidingView, Image, ScrollView, ActivityIndicator
 } from "react-native";
 import { WebView } from "react-native-webview";
 import * as Location from "expo-location";
@@ -14,8 +14,9 @@ import {
 import { ref, onValue, update, get, remove, push } from "firebase/database";
 import { auth, db } from "../../services/firebase";
 import { FARE_ZONES } from "../../constants/routes";
-import PassengerCountModal from "../../components/PassengerCountModal";
+import PassengerCountModal, { FareGroup } from "../../components/PassengerCountModal";
 import { recordTripRevenue } from "../../hooks/useRevenue";
+import { Clock } from "lucide-react-native";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NOTIFICATIONS
@@ -144,6 +145,9 @@ export default function MapScreen() {
 
   // ── Revenue / passenger modal ───────────────────────────────────────────────
   const [passengerModalVisible, setPassengerModalVisible] = useState(false);
+  //ETA for passenger jeep info sheet ───────────────────────────────────────────────
+    const [etaMinutes, setEtaMinutes]   = useState<number | null>(null);
+    const [etaLoading, setEtaLoading]   = useState(false);
 
   // ── Stable role/dest/etc refs for closures ──────────────────────────────────
   const roleRef         = useRef(role);
@@ -636,9 +640,12 @@ export default function MapScreen() {
         var currentDriverFull  = false;
         var passengerViewRoutes = [];
 
-        // Route state — Grab-style consumed/remaining split
+        // Route state — only the road AHEAD of the driver is drawn.
+        // fullRouteCoords holds the full fixed corridor geometry from OSRM.
+        // On every location tick, updateDynamicRoute() slices it from the
+        // driver's snapped position forward — the passed section simply isn't
+        // in the array anymore, so it vanishes automatically (Grab-style).
         var fullRouteCoords = [];
-        var consumedLayer   = null;
         var remainingBorder = null;
         var remainingLayer  = null;
         var remainingDashes = null;
@@ -712,8 +719,19 @@ export default function MapScreen() {
           return { idx: bestIdx, lat: fullRouteCoords[bestIdx][0], lng: fullRouteCoords[bestIdx][1], dist: bestDist };
         }
 
-        // ── DYNAMIC ROUTE UPDATE ──────────────────────────────────────────────
-        // Splits fullRouteCoords at driver position: grey behind, green ahead
+        // ── DYNAMIC ROUTE UPDATE (Grab-style) ────────────────────────────────────
+        // Called on every GPS tick while a trip is active.
+        //
+        // How the "line behind vanishes" effect works:
+        //   1. snapToRoute() finds the nearest point on fullRouteCoords to the
+        //      driver's current GPS → returns splitIdx (the index of that point).
+        //   2. 'remaining' is built as:
+        //        [snappedDriverPos].concat(fullRouteCoords.slice(splitIdx))
+        //      — it starts exactly at the driver and contains ONLY the coords
+        //      ahead of them. The coords behind are simply not included, so
+        //      those polylines shrink from the rear on every tick.
+        //   3. No grey "consumed" layer is drawn at all — nothing behind the
+        //      driver is ever painted.
         function updateDynamicRoute(driverLat, driverLng) {
           if (!fullRouteCoords.length || !hasActiveRoute) return null;
 
@@ -724,21 +742,9 @@ export default function MapScreen() {
           var sLat = snap.dist < SNAP_THRESHOLD ? snap.lat : driverLat;
           var sLng = snap.dist < SNAP_THRESHOLD ? snap.lng : driverLng;
 
-          var splitIdx  = snap.idx;
-          var consumed  = fullRouteCoords.slice(0, splitIdx + 1);
-          if (consumed.length) consumed[consumed.length-1] = [sLat, sLng];
-          var remaining = [[sLat, sLng]].concat(fullRouteCoords.slice(splitIdx));
-
-          if (consumed.length >= 2) {
-            if (!consumedLayer) {
-              consumedLayer = L.polyline(consumed, {
-                color: 'rgba(160,160,160,0.55)', weight: 5,
-                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
-              }).addTo(map);
-            } else {
-              consumedLayer.setLatLngs(consumed);
-            }
-          }
+          // Remaining route: driver's snapped position → destination.
+          // No consumed/grey layer — the road behind simply isn't drawn.
+          var remaining = [[sLat, sLng]].concat(fullRouteCoords.slice(snap.idx));
 
           if (remaining.length >= 2) {
             if (!remainingBorder) {
@@ -761,8 +767,8 @@ export default function MapScreen() {
             }
           }
 
-          // Route completion — within 40 m of final waypoint
-          var end     = fullRouteCoords[fullRouteCoords.length-1];
+          // Route completion — within 40 m of the final corridor waypoint
+          var end     = fullRouteCoords[fullRouteCoords.length - 1];
           var distEnd = haversineM(sLat, sLng, end[0], end[1]);
           if (distEnd < 40 && hasActiveRoute) {
             hasActiveRoute = false;
@@ -776,7 +782,6 @@ export default function MapScreen() {
 
         // ── CLEAR DYNAMIC LAYERS ──────────────────────────────────────────────
         function clearDynamicRoute() {
-          if (consumedLayer)   { map.removeLayer(consumedLayer);   consumedLayer   = null; }
           if (remainingBorder) { map.removeLayer(remainingBorder); remainingBorder = null; }
           if (remainingLayer)  { map.removeLayer(remainingLayer);  remainingLayer  = null; }
           if (remainingDashes) { map.removeLayer(remainingDashes); remainingDashes = null; }
@@ -785,36 +790,39 @@ export default function MapScreen() {
 
         // ── INIT DRIVER TRIP ROUTE ────────────────────────────────────────────
         // Called when DRAW_ZONES message arrives (driver starts trip).
-        // No static background route exists — just draw the active Grab-style route.
+        //
+        // IMPORTANT: We do NOT draw any polylines here directly.
+        // We only fetch and store the route geometry, then immediately call
+        // updateDynamicRoute() with the driver's starting position so that the
+        // Grab-style consumed/remaining system is the single source of truth for
+        // all route rendering — from the very first frame.
+        //
+        // This eliminates the "static green line" that used to appear at trip start
+        // before the driver moved, because nothing is ever drawn outside of
+        // updateDynamicRoute().
+        // ── initDriverRoute ───────────────────────────────────────────────────────
+        // Driver starts a trip. We always fetch the FIXED jeepney corridor
+        // (ROUTE_WAYPOINTS_FWD) — never the driver's live GPS as an OSRM origin.
+        // Using live GPS as the OSRM origin caused it to route via whatever
+        // nearby road it found, diverging from the real jeepney path.
+        //
+        // The driver's GPS is passed to updateDynamicRoute() only for snapping:
+        // it finds the nearest point ON the corridor so the consumed/remaining
+        // split is accurate without distorting the polyline path itself.
         function initDriverRoute(originLat, originLng, destination) {
           clearDynamicRoute();
-          // Also clear any passenger-view route that may have been shown
           passengerViewRoutes.forEach(function(l) { map.removeLayer(l); });
           passengerViewRoutes = [];
 
-          var orderedWaypoints = destination === 'Balacbac'
+          var corridorWaypoints = destination === 'Balacbac'
             ? ROUTE_WAYPOINTS_FWD.slice()
             : ROUTE_WAYPOINTS_FWD.slice().reverse();
-          var allWaypoints = [[originLat, originLng]].concat(orderedWaypoints);
 
-          fetchRoute(allWaypoints, function(coords) {
+          fetchRoute(corridorWaypoints, function(coords) {
             if (!coords) return;
             fullRouteCoords = coords;
             hasActiveRoute  = true;
-
-            remainingBorder = L.polyline(coords, {
-              color: 'rgba(255,255,255,0.92)', weight: 12,
-              lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
-            }).addTo(map);
-            remainingLayer = L.polyline(coords, {
-              color: '#15803d', weight: 7, opacity: 0.96,
-              lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
-            }).addTo(map);
-            remainingDashes = L.polyline(coords, {
-              color: 'rgba(255,255,255,0.5)', weight: 3,
-              dashArray: '1, 16', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
-            }).addTo(map);
-
+            updateDynamicRoute(originLat, originLng);
             map.fitBounds(L.polyline(coords).getBounds(), { padding: [50, 50] });
           });
         }
@@ -853,37 +861,86 @@ export default function MapScreen() {
           segs.push(remaining);
           return segs;
         }
-        function buildAndDrawZoneRoute(originLat, originLng, destination, zoneColors, layerArray) {
-          var ordered = destination === 'Balacbac'
-            ? ROUTE_WAYPOINTS_FWD.slice() : ROUTE_WAYPOINTS_FWD.slice().reverse();
-          var all = [[originLat, originLng]].concat(ordered);
-          var boundaries = all.slice(1, all.length-1);
-          fetchRoute(all, function(coords) {
+        // ── showJeepRoute (passenger taps a jeep bubble) ────────────────────────
+        //
+        // What the passenger sees:
+        //   • A green route line that starts exactly at the driver's current GPS
+        //     position and follows the fixed jeepney corridor to the destination.
+        //   • Only the road AHEAD of the driver is drawn — nothing behind.
+        //   • Zone colours split the route by fare zones along the corridor.
+        //
+        // How it works:
+        //   1. Get the full corridor in the right direction (Balacbac→Town or
+        //      Town→Balacbac) from ROUTE_WAYPOINTS_FWD.
+        //   2. Walk the corridor waypoints and find the one nearest to the jeep's
+        //      current GPS position — this is where the driver is on the corridor.
+        //   3. Slice the corridor FROM that nearest waypoint to the destination
+        //      (the "remaining" portion of the route).
+        //   4. Prepend the driver's actual GPS lat/lng as the very first point.
+        //      OSRM receives: [driver GPS, nearestWaypoint, ..., destination].
+        //      Because the driver is physically close to the corridor, OSRM
+        //      snaps immediately onto the real road and follows it — the line
+        //      starts at the driver and traces the correct jeepney path.
+        //   5. Zone boundaries are the intermediate remaining waypoints so the
+        //      colour split still matches the fare zones ahead of the driver.
+        function showJeepRoute(jeepId) {
+          passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
+          passengerViewRoutes = [];
+
+          var jeep = jeepsData[jeepId];
+          if (!jeep || !jeep.destination || !jeep.latitude || !jeep.longitude) {
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SHOW_FARE_MODAL', jeepId: jeepId }));
+            }
+            return;
+          }
+
+          // Step 1 — corridor in the correct direction for this jeep
+          var corridor = jeep.destination === 'Balacbac'
+            ? ROUTE_WAYPOINTS_FWD.slice()
+            : ROUTE_WAYPOINTS_FWD.slice().reverse();
+
+          // Step 2 — find the corridor waypoint nearest to the driver's GPS
+          var nearestIdx  = 0;
+          var nearestDist = Infinity;
+          for (var i = 0; i < corridor.length; i++) {
+            var d = haversineM(jeep.latitude, jeep.longitude, corridor[i][0], corridor[i][1]);
+            if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+          }
+
+          // Step 3 — slice: only the corridor waypoints FROM nearest → destination
+          var remainingCorridor = corridor.slice(nearestIdx);
+
+          // Step 4 — prepend driver's real GPS so the line starts there visually
+          var fetchWaypoints = [[jeep.latitude, jeep.longitude]].concat(remainingCorridor);
+
+          // Step 5 — zone boundaries: intermediate remaining corridor waypoints
+          //   (skip the first — that's the driver GPS — and skip the last — destination)
+          var boundaries = remainingCorridor.slice(1, remainingCorridor.length - 1);
+
+          var colors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
+          var zc = jeep.destination === 'Town' ? colors.slice().reverse() : colors;
+
+          fetchRoute(fetchWaypoints, function(coords) {
             if (!coords) return;
             var rawSegs = splitRouteIntoZones(coords, boundaries);
             rawSegs.forEach(function(seg, idx) {
-              drawNavRoute(seg, zoneColors[Math.min(idx, zoneColors.length-1)], layerArray);
+              drawNavRoute(seg, zc[Math.min(idx, zc.length - 1)], passengerViewRoutes);
             });
-            if (layerArray.length > 0) {
-              var fills = layerArray.filter(function(_, i) { return i%3===2; });
-              if (fills.length) map.fitBounds(L.featureGroup(fills).getBounds(), { padding: [50, 50] });
+            if (passengerViewRoutes.length > 0) {
+              var fills = passengerViewRoutes.filter(function(_, i) { return i % 3 === 2; });
+              if (fills.length) {
+                map.fitBounds(L.featureGroup(fills).getBounds(), { padding: [50, 50] });
+              }
             }
           });
-        }
-        function showJeepRoute(jeepId) {
-          // Clear any previous passenger-view route
-          passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
-          passengerViewRoutes = [];
-          var jeep = jeepsData[jeepId];
-          if (!jeep || !jeep.destination || !jeep.latitude || !jeep.longitude) {
-            if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SHOW_FARE_MODAL', jeepId: jeepId }));
-            return;
-          }
-          var colors = ['#22c55e','#eab308','#f97316','#ef4444'];
-          var zc = jeep.destination === 'Town' ? colors.slice().reverse() : colors;
-          buildAndDrawZoneRoute(jeep.latitude, jeep.longitude, jeep.destination, zc, passengerViewRoutes);
+
           setTimeout(function() {
-            if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SHOW_FARE_MODAL', jeepId: jeepId, destination: jeep.destination }));
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'SHOW_FARE_MODAL', jeepId: jeepId, destination: jeep.destination
+              }));
+            }
           }, 1500);
         }
 
@@ -1095,23 +1152,48 @@ export default function MapScreen() {
             if (message.type === "MAP_READY")       setWebViewLoaded(true);
             if (message.type === "SHOW_FARE_MODAL") setFareModalVisible(true);
 
-            if (message.type === "JEEP_TAPPED") {
-              const { jeepId, destination, status } = message;
-              get(ref(db, `jeep_info/${jeepId}`)).then(snap => {
-                const d = snap.exists() ? snap.val() : {};
-                openJeepInfoSheet({
-                  driverName:  d.driverName  || "Unknown Driver",
-                  plateNumber: d.plate       || "Not set",
-                  profilePic:  d.profilePic  || null,
-                  status:      status        || "available",
-                  destination: destination   || null,
-                });
-              }).catch(() => openJeepInfoSheet({
-                driverName: "Unknown Driver", plateNumber: "Not set",
-                profilePic: null, status: status || "available", destination: destination || null,
-              }));
-            }
+if (message.type === "JEEP_TAPPED") {
+     const { jeepId, destination, status } = message;
+     setEtaMinutes(null); // reset
+     get(ref(db, `jeep_info/${jeepId}`)).then(snap => {
+       const d = snap.exists() ? snap.val() : {};
+       openJeepInfoSheet({
+         driverName:  d.driverName  || "Unknown Driver",
+         plateNumber: d.plate       || "Not set",
+         profilePic:  d.profilePic  || null,
+         status:      status        || "available",
+         destination: destination   || null,
+       });
+     }).catch(() => openJeepInfoSheet({
+       driverName: "Unknown Driver", plateNumber: "Not set",
+       profilePic: null, status: status || "available", destination: destination || null,
+     }));
 
+     // Fetch ETA via OSRM from jeep's current position to passenger's position
+     if (currentLocationRef.current) {
+       const passengerLat = currentLocationRef.current.lat;
+       const passengerLng = currentLocationRef.current.lng;
+       setEtaLoading(true);
+       get(ref(db, `jeeps/${jeepId}`)).then(jeepSnap => {
+         if (!jeepSnap.exists()) { setEtaLoading(false); return; }
+         const jeep = jeepSnap.val();
+         if (!jeep.latitude || !jeep.longitude) { setEtaLoading(false); return; }
+         const url = `https://router.project-osrm.org/route/v1/driving/`
+           + `${jeep.longitude},${jeep.latitude};${passengerLng},${passengerLat}`
+           + `?overview=false&annotations=false`;
+         fetch(url)
+           .then(r => r.json())
+           .then(data => {
+             if (data.routes && data.routes[0]) {
+               const secs = data.routes[0].duration;
+               setEtaMinutes(Math.ceil(secs / 60));
+             }
+           })
+           .catch(() => {})
+           .finally(() => setEtaLoading(false));
+       }).catch(() => setEtaLoading(false));
+     }
+   }
             if (message.type === "ROUTE_COMPLETED") {
               Alert.alert(
                 "🏁 Route Complete!",
@@ -1267,6 +1349,25 @@ export default function MapScreen() {
               <View style={[styles.sheetIconBox, { backgroundColor: "#F3F4F6" }]}><Truck color="#6B7280" size={20} /></View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.sheetRowLabel}>Route</Text>
+              <View style={styles.sheetRow}>
+                <View style={[styles.sheetIconBox, { backgroundColor: "#FEF3C7" }]}>
+                  <Clock color="#D97706" size={20} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sheetRowLabel}>ETA to You</Text>
+                  {etaLoading ? (
+                    <ActivityIndicator size="small" color="#15803d" style={{ alignSelf: "flex-start", marginTop: 4 }} />
+                  ) : etaMinutes !== null ? (
+                    <Text style={[styles.sheetRowValue, { color: etaMinutes <= 3 ? "#15803d" : etaMinutes <= 8 ? "#D97706" : "#111827" }]}>
+                      {etaMinutes <= 1 ? "Arriving now" : `~${etaMinutes} min away`}
+                    </Text>
+                  ) : (
+                    <Text style={[styles.sheetRowValue, { color: "#9CA3AF" }]}>
+                      {currentLocationRef.current ? "Calculating…" : "Enable location for ETA"}
+                    </Text>
+                  )}
+                </View>
+              </View>
                 <Text style={styles.sheetRowValue}>Balacbac To Town</Text>
               </View>
             </View>
@@ -1399,20 +1500,17 @@ export default function MapScreen() {
         visible={passengerModalVisible}
         destination={currentDest}
         onCancel={() => setPassengerModalVisible(false)}
-        onConfirm={async (passengerCount, farePerPassenger) => {
+        onConfirm={async (groups: FareGroup[]) => {
           setPassengerModalVisible(false);
           if (auth.currentUser) {
-            const jeepInfoSnap = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
-            const dName = jeepInfoSnap.exists()
-              ? (jeepInfoSnap.val().driverName ?? "Unknown Driver")
-              : "Unknown Driver";
+            const snap = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
+            const dName = snap.exists() ? (snap.val().driverName ?? "Unknown Driver") : "Unknown Driver";
             await recordTripRevenue({
-              driverId:         auth.currentUser.uid,
-              driverName:       dName,
-              passengerCount,
-              farePerPassenger,
-              route:            currentDest === "Town" ? "Balacbac–Town" : "Town–Balacbac",
-              tripId:           currentTripIdRef.current ?? `trip_${Date.now()}`,
+              driverId:   auth.currentUser.uid,
+              driverName: dName,
+              groups,
+              route:      currentDest === "Town" ? "Balacbac–Town" : "Town–Balacbac",
+              tripId:     currentTripIdRef.current ?? `trip_${Date.now()}`,
             });
           }
           await endTripSilent();
