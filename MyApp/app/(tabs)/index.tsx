@@ -312,7 +312,17 @@ export default function HomeScreen() {
     setBulletinModalVisible(true);
   };
 
-  const goToMap = () => router.push("/mapscreen");
+  const goToMap = () => {
+    const currentHour = new Date().getHours();
+    if (currentHour >= 21 || currentHour < 4) {
+      Alert.alert(
+        "Off Operating Hours", 
+        "There are no jeeps available at this time."
+      );
+      return;
+    }
+    router.push("/mapscreen");
+  };
 
   const filteredPosts = activeFilter === "all"
     ? communityPosts
@@ -425,7 +435,7 @@ export default function HomeScreen() {
                 <Sparkles color="#15803d" size={22} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: 16, fontWeight: "700", color: textMain }}>Fare Assistant</Text>
+                <Text style={{ fontSize: 16, fontWeight: "700", color: textMain }}>Fare AI</Text>
                 <Text style={{ fontSize: 12, color: textMuted, marginTop: 1 }}>Ask about prices, zones & discounts</Text>
               </View>
               <ChevronDown

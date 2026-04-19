@@ -10,7 +10,7 @@ export default function RootLayout() {
         {/* The 'index' route will act as our Auth Check */}
         <Stack.Screen name="index" /> 
         <Stack.Screen name="login" />
-        <Stack.Screen name="register" />
+        <Stack.Screen name="registration" />
         {/* The main app lives here */}
         <Stack.Screen name="(tabs)" /> 
       </Stack>

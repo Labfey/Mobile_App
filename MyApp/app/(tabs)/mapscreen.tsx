@@ -3,6 +3,7 @@ import {
   View, StyleSheet, Text, TouchableOpacity, Modal, Alert,
   Animated, Platform, TextInput, KeyboardAvoidingView, Image, ScrollView, ActivityIndicator
 } from "react-native";
+import { useRouter } from "expo-router";
 import { WebView } from "react-native-webview";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
@@ -12,7 +13,7 @@ import {
   Truck, ChevronRight, X, Calculator, Hand
 } from "lucide-react-native";
 import { ref, onValue, update, get, remove, push } from "firebase/database";
-import { auth, db } from "../../services/firebase";
+import { auth, db,} from "../../services/firebase";
 import { FARE_ZONES } from "../../constants/routes";
 import PassengerCountModal, { FareGroup } from "../../components/PassengerCountModal";
 import { recordTripRevenue } from "../../hooks/useRevenue";
@@ -36,6 +37,7 @@ Notifications.setNotificationHandler({
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
+
 const TERMINALS = {
   TOWN:   { lat: 16.414019, lng: 120.593455, label: "Town Terminal" },
   TIERRA: { lat: 16.378759, lng: 120.586049, label: "Balacbac Terminal" },
@@ -43,23 +45,43 @@ const TERMINALS = {
 const TERMINAL_RADIUS_METERS = 80;
 const LOCATION_TASK_NAME = "background-location-task";
 
+interface Fares {
+    zone1: number; zone1Disc: number;
+    zone2: number; zone2Disc: number;
+    zone3: number; zone3Disc: number;
+    zone4: number; zone4Disc: number;
+}
+ 
+const DEFAULT_FARES: Fares = {
+    zone1: 13, zone1Disc: 10,
+    zone2: 15, zone2Disc: 12,
+    zone3: 17, zone3Disc: 14,
+    zone4: 20, zone4Disc: 16,
+};
+ 
 // ─────────────────────────────────────────────────────────────────────────────
 // FARE CALCULATOR HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STOP_ORDER: Record<string, number> = {
-  Town: 0, Shell: 1, Junction: 2, Centro: 3, Friendship: 4, Balacbac: 5,
+    Town: 0, Shell: 1, Junction: 2, Centro: 3, Friendship: 4, Balacbac: 5,
 };
-
-function getZoneFare(from: string, to: string): number {
-  const diff = Math.abs((STOP_ORDER[from] ?? 0) - (STOP_ORDER[to] ?? 0));
-  if (diff === 0) return 0;
-  if (diff === 1) return 13;
-  if (diff === 2) return 15;
-  if (diff === 3) return 17;
-  return 20;
+ 
+// Returns the correct zone fare from the live Firebase fares object.
+// discounted = true  → Student / Senior / PWD rate (zone1Disc, zone2Disc, …)
+// discounted = false → Regular rate (zone1, zone2, …)
+function getFareForDiff(diff: number, fares: Fares, discounted = false): number {
+    if (diff <= 0) return 0;
+    if (diff === 1) return discounted ? fares.zone1Disc : fares.zone1;
+    if (diff === 2) return discounted ? fares.zone2Disc : fares.zone2;
+    if (diff === 3) return discounted ? fares.zone3Disc : fares.zone3;
+    return discounted ? fares.zone4Disc : fares.zone4;
 }
-
+ 
+function getZoneFare(from: string, to: string, fares: Fares, discounted = false): number {
+    const diff = Math.abs((STOP_ORDER[from] ?? 0) - (STOP_ORDER[to] ?? 0));
+    return getFareForDiff(diff, fares, discounted);
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // BACKGROUND LOCATION TASK
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +112,40 @@ interface ExtendedZone {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function MapScreen() {
+
+const router = useRouter();
+
+  useEffect(() => {
+    const checkOperatingHours = () => {
+      const currentHour = new Date().getHours();
+      
+      // Check if time is between 9 PM (21) and 4 AM (4)
+      if (currentHour >= 21 || currentHour < 4) {
+        Alert.alert(
+          "Service Unavailable",
+          "There are no jeeps available at this time. Operating hours are 4:00 AM to 9:00 PM.",
+          [{ text: "OK", onPress: () => router.replace("/") }]
+        );
+      }
+    };
+
+    checkOperatingHours();
+  }, []);
+
+
   const webViewRef = useRef<WebView>(null);
+  // Live fare rates from Firebase — synced with admin settings
+const [fares, setFares] = useState<Fares>(DEFAULT_FARES);
+ 
+useEffect(() => {
+    const unsub = onValue(ref(db, "config/fares"), snap => {
+        if (snap.exists()) {
+            setFares({ ...DEFAULT_FARES, ...snap.val() });
+        }
+    });
+    return () => unsub();
+}, []);
+ 
 
   // ── Core state ──────────────────────────────────────────────────────────────
   const [loading, setLoading]               = useState(true);
@@ -130,7 +185,7 @@ export default function MapScreen() {
   const bannerAnim        = useRef(new Animated.Value(-100)).current;
   const departedJeepsRef  = useRef<Set<string>>(new Set());
 
-  // ── Fare calculator ─────────────────────────────────────────────────────────
+   // ── Fare calculator ─────────────────────────────────────────────────────────
   const [fareCalcVisible, setFareCalcVisible] = useState(false);
   const [fareFrom, setFareFrom] = useState("");
   const [fareTo, setFareTo]     = useState("");
@@ -1221,6 +1276,7 @@ if (message.type === "JEEP_TAPPED") {
         </TouchableOpacity>
       )}
 
+
       {/* ── PASSENGER / GUEST RIDE REQUEST PANEL ────────────────────────── */}
       {role !== "driver" && (
         <View style={styles.passengerPanel}>
@@ -1449,52 +1505,89 @@ if (message.type === "JEEP_TAPPED") {
         </View>
       </Modal>
 
-      {/* ── FARE CALCULATOR MODAL ────────────────────────────────────────── */}
-      <Modal visible={fareCalcVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+
+{/* ── FARE CALCULATOR MODAL ────────────────────────────────────────────────── */}
+{/* REPLACE the entire existing <Modal visible={fareCalcVisible}> block with this */}
+<Modal visible={fareCalcVisible} transparent animationType="slide">
+    <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-              <Text style={styles.modalTitle}>Fare Calculator</Text>
-              <TouchableOpacity onPress={() => { setFareCalcVisible(false); setFareFrom(""); setFareTo(""); }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-                <X color="#6B7280" size={24} />
-              </TouchableOpacity>
+                <Text style={styles.modalTitle}>Fare Calculator</Text>
+                <TouchableOpacity
+                    onPress={() => { setFareCalcVisible(false); setFareFrom(""); setFareTo(""); }}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                    <X color="#6B7280" size={24} />
+                </TouchableOpacity>
             </View>
+
             <Text style={styles.inputLabel}>From</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }} contentContainerStyle={{ gap: 8 }}>
-              {["Town", "Shell", "Junction", "Centro", "Friendship", "Balacbac"].map(stop => (
-                <TouchableOpacity key={"from-"+stop} onPress={() => setFareFrom(stop)} style={[styles.stopChip, fareFrom === stop && styles.stopChipActive]}>
-                  <Text style={[styles.stopChipText, fareFrom === stop && styles.stopChipTextActive]}>{stop}</Text>
-                </TouchableOpacity>
-              ))}
+                {["Town", "Shell", "Junction", "Centro", "Friendship", "Balacbac"].map(stop => (
+                    <TouchableOpacity
+                        key={"from-" + stop}
+                        onPress={() => setFareFrom(stop)}
+                        style={[styles.stopChip, fareFrom === stop && styles.stopChipActive]}
+                    >
+                        <Text style={[styles.stopChipText, fareFrom === stop && styles.stopChipTextActive]}>{stop}</Text>
+                    </TouchableOpacity>
+                ))}
             </ScrollView>
+
             <Text style={styles.inputLabel}>To</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 20 }} contentContainerStyle={{ gap: 8 }}>
-              {["Town", "Shell", "Junction", "Centro", "Friendship", "Balacbac"].map(stop => (
-                <TouchableOpacity key={"to-"+stop} onPress={() => setFareTo(stop)} style={[styles.stopChip, fareTo === stop && styles.stopChipActive]}>
-                  <Text style={[styles.stopChipText, fareTo === stop && styles.stopChipTextActive]}>{stop}</Text>
-                </TouchableOpacity>
-              ))}
+                {["Town", "Shell", "Junction", "Centro", "Friendship", "Balacbac"].map(stop => (
+                    <TouchableOpacity
+                        key={"to-" + stop}
+                        onPress={() => setFareTo(stop)}
+                        style={[styles.stopChip, fareTo === stop && styles.stopChipActive]}
+                    >
+                        <Text style={[styles.stopChipText, fareTo === stop && styles.stopChipTextActive]}>{stop}</Text>
+                    </TouchableOpacity>
+                ))}
             </ScrollView>
-            {fareFrom && fareTo && fareFrom !== fareTo ? (
-              <View style={styles.fareResult}>
-                <Text style={styles.fareResultRoute}>{fareFrom} → {fareTo}</Text>
-                <Text style={styles.fareResultAmount}>₱{getZoneFare(fareFrom, fareTo)}</Text>
-                <Text style={styles.fareResultNote}>Senior/Student: ₱{Math.ceil(getZoneFare(fareFrom, fareTo) * 0.8)} (20% off)</Text>
-              </View>
-            ) : fareFrom && fareTo && fareFrom === fareTo ? (
-              <View style={[styles.fareResult, { backgroundColor: "#FEF3C7" }]}>
-                <Text style={{ color: "#92400E", fontWeight: "700", textAlign: "center" }}>Please select different stops</Text>
-              </View>
-            ) : (
-              <View style={[styles.fareResult, { backgroundColor: "#F3F4F6" }]}>
-                <Text style={{ color: "#9CA3AF", textAlign: "center", fontWeight: "600" }}>Select From and To stops above</Text>
-              </View>
-            )}
-          </View>
-        </View>
-      </Modal>
 
+            {/* ── RESULT ── */}
+            {fareFrom && fareTo && fareFrom !== fareTo ? (
+                <View style={styles.fareResult}>
+                    <Text style={styles.fareResultRoute}>{fareFrom} → {fareTo}</Text>
+
+                    {/* Regular fare */}
+                    <View style={fareCalcStyles.fareRow}>
+                        <Text style={fareCalcStyles.fareTypeLabel}>Regular</Text>
+                        <Text style={fareCalcStyles.fareAmount}>
+                            ₱{getZoneFare(fareFrom, fareTo, fares, false)}
+                        </Text>
+                    </View>
+
+                    {/* Discounted fare (Student / Senior / PWD) */}
+                    <View style={[fareCalcStyles.fareRow, fareCalcStyles.discountedRow]}>
+                        <View>
+                            <Text style={fareCalcStyles.fareTypeLabel}>Discounted</Text>
+                            <Text style={fareCalcStyles.fareTypeDesc}>Student · Senior · PWD</Text>
+                        </View>
+                        <Text style={[fareCalcStyles.fareAmount, fareCalcStyles.discountedAmount]}>
+                            ₱{getZoneFare(fareFrom, fareTo, fares, true)}
+                        </Text>
+                    </View>
+                </View>
+            ) : fareFrom && fareTo && fareFrom === fareTo ? (
+                <View style={[styles.fareResult, { backgroundColor: "#FEF3C7" }]}>
+                    <Text style={{ color: "#92400E", fontWeight: "700", textAlign: "center" }}>
+                        Please select different stops
+                    </Text>
+                </View>
+            ) : (
+                <View style={[styles.fareResult, { backgroundColor: "#F3F4F6" }]}>
+                    <Text style={{ color: "#9CA3AF", textAlign: "center", fontWeight: "600" }}>
+                        Select From and To stops above
+                    </Text>
+                </View>
+            )}
+        </View>
+    </View>
+</Modal>
       {/* ── PASSENGER COUNT / REVENUE MODAL ─────────────────────────────── */}
       <PassengerCountModal
         visible={passengerModalVisible}
@@ -1526,6 +1619,8 @@ if (message.type === "JEEP_TAPPED") {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f8f9fa" },
+
+  
 
   fareCalcFab: {
     position: "absolute", bottom: 100, right: 16,
@@ -1617,4 +1712,44 @@ const styles = StyleSheet.create({
   textInput:       { backgroundColor: "#F9FAFB", borderWidth: 1.5, borderColor: "#E5E7EB", borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14, fontSize: 16, color: "#111827", marginBottom: 16 },
   saveProfileBtn:  { backgroundColor: "#15803d", borderRadius: 14, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 4 },
   saveProfileBtnText:{ color: "white", fontWeight: "700", fontSize: 16 },
+});
+
+
+const fareCalcStyles = StyleSheet.create({
+    fareRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingVertical: 10,
+        borderTopWidth: 1,
+        borderTopColor: "rgba(21,128,61,0.12)",
+        marginTop: 8,
+    },
+    discountedRow: {
+        backgroundColor: "rgba(21,128,61,0.06)",
+        borderRadius: 10,
+        paddingHorizontal: 10,
+        marginHorizontal: -10,
+        borderTopWidth: 0,
+        marginTop: 4,
+    },
+    fareTypeLabel: {
+        fontSize: 13,
+        fontWeight: "700",
+        color: "#374151",
+    },
+    fareTypeDesc: {
+        fontSize: 11,
+        color: "#6B7280",
+        marginTop: 1,
+    },
+    fareAmount: {
+        fontSize: 28,
+        fontWeight: "900",
+        color: "#15803d",
+    },
+    discountedAmount: {
+        fontSize: 24,
+        color: "#2563eb",
+    },
 });
