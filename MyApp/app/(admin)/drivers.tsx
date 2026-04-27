@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from "react";
 import {
     View, Text, ScrollView, StyleSheet, ActivityIndicator,
-    TouchableOpacity, Modal, Dimensions
+    TouchableOpacity, Modal, Dimensions, Alert
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
     Users, ChevronRight, X, MapPin, Calendar,
-    Clock, TrendingUp, Navigation, BarChart2, DollarSign
+    Clock, TrendingUp, Navigation, BarChart2, DollarSign, Trash2
 } from "lucide-react-native";
-import { db, ref, onValue, get } from "../../services/firebase";
+import { db, ref, onValue, get, remove, update } from "../../services/firebase";
 import { useDriverRevenue, DateFilter } from "../../hooks/useRevenue";
 
 const { height } = Dimensions.get("window");
@@ -28,7 +28,7 @@ const dur = (s: number, e: number | null) => {
 const todayStr    = () => new Date().toISOString().split("T")[0];
 const weekStartStr = () => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split("T")[0]; };
 
-// ─── Revenue panel (shown inside driver detail) ────────────────────────────────
+// ─── Revenue panel ────────────────────────────────────────────────────────────
 function RevenuePanel({ driverId }: { driverId: string }) {
     const [filter, setFilter] = useState<DateFilter>("today");
     const { entries, stats, loading } = useDriverRevenue(driverId, filter);
@@ -40,7 +40,6 @@ function RevenuePanel({ driverId }: { driverId: string }) {
 
     return (
         <View style={rp.wrap}>
-            {/* Filter tabs */}
             <View style={rp.tabs}>
                 {TABS.map(t => (
                     <TouchableOpacity key={t.k} onPress={() => setFilter(t.k)} style={[rp.tab, filter === t.k && rp.tabA]}>
@@ -50,7 +49,6 @@ function RevenuePanel({ driverId }: { driverId: string }) {
             </View>
 
             {loading ? <ActivityIndicator color="#15803d" style={{ marginVertical: 12 }} /> : <>
-                {/* Summary cards */}
                 <View style={rp.statsRow}>
                     <View style={[rp.stat, { backgroundColor: "#f0fdf4" }]}>
                         <Text style={rp.statAmt}>₱{stats.total.toLocaleString()}</Text>
@@ -81,7 +79,6 @@ function RevenuePanel({ driverId }: { driverId: string }) {
                                     {e.passengerCount} pax ·{" "}
                                     {new Date(e.timestamp).toLocaleDateString("en-PH", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                                 </Text>
-                                {/* Fare group breakdown */}
                                 {e.groups && e.groups.length > 0 && (
                                     <Text style={rp.rowGroups}>
                                         {e.groups.map((g: any) => `${g.passengerCount}×₱${g.farePerPassenger}`).join("  +  ")}
@@ -125,7 +122,8 @@ export default function AdminDrivers() {
     const [trips, setTrips]             = useState<Trip[]>([]);
     const [tripsLoading, setTripsLoading] = useState(false);
     const [tripView, setTripView]       = useState<TripView>("today");
-    const [mainTab, setMainTab]         = useState<MainTab>("trips");   // ← tabs inside detail
+    const [mainTab, setMainTab]         = useState<MainTab>("trips");
+    const [deleting, setDeleting]       = useState(false);
 
     // Live driver list
     useEffect(() => {
@@ -162,6 +160,55 @@ export default function AdminDrivers() {
             }
         } catch { setTrips([]); }
         finally { setTripsLoading(false); }
+    };
+
+    // ── DELETE DRIVER ─────────────────────────────────────────────────────────
+    const handleDeleteDriver = (driver: Driver) => {
+        Alert.alert(
+            "Remove Driver",
+            `This will permanently remove ${driver.username} from the system.\n\nThis deletes their profile, jeep info, and trip data.\n\nNote: Their login account remains in Firebase Auth — contact your Firebase console to fully revoke access.`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Remove Driver",
+                    style: "destructive",
+                    onPress: () => {
+                        Alert.alert(
+                            "Are you sure?",
+                            `Remove ${driver.username}? This cannot be undone.`,
+                            [
+                                { text: "Cancel", style: "cancel" },
+                                {
+                                    text: "Yes, Remove",
+                                    style: "destructive",
+                                    onPress: async () => {
+                                        setDeleting(true);
+                                        try {
+                                            // Remove from users node
+                                            await remove(ref(db, `users/${driver.uid}`));
+                                            // Remove live jeep data
+                                            await remove(ref(db, `jeeps/${driver.uid}`));
+                                            // Remove static jeep info
+                                            await remove(ref(db, `jeep_info/${driver.uid}`));
+                                            // Remove trip history
+                                            await remove(ref(db, `driver_trips/${driver.uid}`));
+                                            // Remove revenue entries
+                                            await remove(ref(db, `revenue/${driver.uid}`));
+                                            setSelected(null);
+                                            Alert.alert("✅ Removed", `${driver.username} has been removed from the system.`);
+                                        } catch (e) {
+                                            Alert.alert("Error", "Failed to remove driver. Check your connection.");
+                                        } finally {
+                                            setDeleting(false);
+                                        }
+                                    },
+                                },
+                            ]
+                        );
+                    },
+                },
+            ]
+        );
     };
 
     // Trip filtering
@@ -229,6 +276,17 @@ export default function AdminDrivers() {
                                         <Text style={s.mName}>{selected.username}</Text>
                                         <Text style={s.mEmail}>{selected.email}</Text>
                                     </View>
+                                    {/* ── DELETE BUTTON ── */}
+                                    <TouchableOpacity
+                                        onPress={() => handleDeleteDriver(selected)}
+                                        style={s.deleteBtn}
+                                        disabled={deleting}
+                                    >
+                                        {deleting
+                                            ? <ActivityIndicator color="#ef4444" size="small" />
+                                            : <Trash2 color="#ef4444" size={18} />
+                                        }
+                                    </TouchableOpacity>
                                     <TouchableOpacity onPress={() => setSelected(null)} style={s.closeBtn}>
                                         <X color="#6b7280" size={20} />
                                     </TouchableOpacity>
@@ -279,7 +337,6 @@ export default function AdminDrivers() {
                                 {/* ── TRIPS TAB ──────────────────────────────────── */}
                                 {mainTab === "trips" && (
                                     <>
-                                        {/* Today / This Week sub-toggle */}
                                         <View style={s.toggleRow}>
                                             <TouchableOpacity
                                                 style={[s.toggleBtn, tripView === "today" && s.toggleActive]}
@@ -369,6 +426,23 @@ export default function AdminDrivers() {
                                         <RevenuePanel driverId={selected.uid} />
                                     </ScrollView>
                                 )}
+
+                                {/* ── DANGER ZONE ─────────────────────────────────── */}
+                                <TouchableOpacity
+                                    style={s.dangerZoneBtn}
+                                    onPress={() => handleDeleteDriver(selected)}
+                                    disabled={deleting}
+                                    activeOpacity={0.8}
+                                >
+                                    {deleting ? (
+                                        <ActivityIndicator color="#ef4444" size="small" />
+                                    ) : (
+                                        <>
+                                            <Trash2 color="#ef4444" size={16} />
+                                            <Text style={s.dangerZoneTxt}>Remove Driver from System</Text>
+                                        </>
+                                    )}
+                                </TouchableOpacity>
                             </>
                         )}
                     </View>
@@ -399,29 +473,28 @@ const s = StyleSheet.create({
     badgeText: { color: "#15803d", fontSize: 12, fontWeight: "700" },
 
     overlay:   { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-    sheet:     { backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 32 },
+    sheet:     { backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 16 },
     handle:    { width: 40, height: 5, backgroundColor: "#e5e7eb", borderRadius: 3, alignSelf: "center", marginBottom: 16 },
 
-    mHeader:   { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 14 },
+    mHeader:   { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 14 },
     mAvatar:   { width: 50, height: 50, borderRadius: 25, backgroundColor: "#dcfce7", alignItems: "center", justifyContent: "center" },
     mAvatarTxt:{ fontSize: 22, fontWeight: "800", color: "#15803d" },
     mName:     { fontSize: 18, fontWeight: "800", color: "#111827" },
     mEmail:    { fontSize: 13, color: "#6b7280" },
     closeBtn:  { padding: 8, backgroundColor: "#f3f4f6", borderRadius: 12 },
+    deleteBtn: { padding: 8, backgroundColor: "#fee2e2", borderRadius: 12 },
 
     quickStats:{ flexDirection: "row", gap: 8, marginBottom: 14 },
     qs:        { flex: 1, borderRadius: 12, padding: 10, alignItems: "center", gap: 3 },
     qsN:       { fontSize: 18, fontWeight: "900" },
     qsL:       { fontSize: 9, fontWeight: "700", color: "#9ca3af", textTransform: "uppercase" },
 
-    // Main Trips / Revenue tab
     mainTabRow:   { flexDirection: "row", backgroundColor: "#f3f4f6", borderRadius: 14, padding: 4, marginBottom: 14, gap: 4 },
     mainTab:      { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 10, borderRadius: 11, gap: 6 },
     mainTabActive:{ backgroundColor: "#15803d" },
     mainTabTxt:   { fontSize: 13, fontWeight: "700", color: "#6b7280" },
     mainTabTxtA:  { color: "white" },
 
-    // Sub-toggle (today / week)
     toggleRow:   { flexDirection: "row", backgroundColor: "#f3f4f6", borderRadius: 12, padding: 3, marginBottom: 12, gap: 3 },
     toggleBtn:   { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 8, borderRadius: 10, gap: 5 },
     toggleActive:{ backgroundColor: "#15803d" },
@@ -442,4 +515,13 @@ const s = StyleSheet.create({
     tripDate:   { fontSize: 11, color: "#9ca3af", marginTop: 2 },
     tripBadge:  { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
     tripBadgeTxt:{ fontSize: 11, fontWeight: "700" },
+
+    // Danger zone button — sits below the tab content
+    dangerZoneBtn: {
+        flexDirection: "row", alignItems: "center", justifyContent: "center",
+        gap: 8, backgroundColor: "#fee2e2", borderRadius: 12,
+        paddingVertical: 14, marginTop: 10, marginBottom: 4,
+        borderWidth: 1, borderColor: "#fecaca",
+    },
+    dangerZoneTxt: { color: "#ef4444", fontWeight: "700", fontSize: 14 },
 });
