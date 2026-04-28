@@ -1,507 +1,562 @@
-import React, { useEffect, useState } from "react";
+/**
+ * app/driver-registration.tsx
+ *
+ * USER-FACING driver application form.
+ * Replaces the old /registration route that mistakenly opened the admin view.
+ *
+ * Steps:
+ *  0 – Account Info   (name, email, password)
+ *  1 – Professional   (license number, operator name)
+ *  2 – Documents      (license photo, government ID photo via ImagePicker)
+ *  3 – Terms of Service agreement
+ *
+ * On submit → creates a Firebase Auth account + writes to pending_registrations/
+ * The account starts with role "pending_driver" so the admin can approve/reject.
+ *
+ * Install dependency if not already present:
+ *   npx expo install expo-image-picker
+ */
+
+import React, { useState } from "react";
 import {
-    View, Text, ScrollView, StyleSheet, ActivityIndicator,
-    TouchableOpacity, Alert, Modal, Image, Dimensions, TextInput
+    View, Text, TextInput, TouchableOpacity, ScrollView,
+    Alert, ActivityIndicator, StyleSheet, Image,
+    Platform, KeyboardAvoidingView, Dimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import {
-    CheckCircle, XCircle, Eye, FileText, Clock, User,
-    CreditCard, X, UserPlus, Lock, Mail, Building2,
+    ArrowLeft, ArrowRight, User, Mail, Lock,
+    CreditCard, Camera, Check, Building2, FileText, Shield,
 } from "lucide-react-native";
-import { db, ref, onValue, update } from "../services/firebase";
+import * as ImagePicker from "expo-image-picker";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { auth } from "../services/firebase";
-import { set } from "firebase/database";
+import { auth, db, ref } from "../services/firebase";
+import { set, update } from "firebase/database";
 
-const { width, height } = Dimensions.get("window");
+const { width } = Dimensions.get("window");
 
-type RegStatus = "pending" | "approved" | "rejected";
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-// ▼ NEW: operatorName field added
-interface Registration {
-    uid: string;
+interface FormState {
+    // Step 0
     fullName: string;
     email: string;
+    password: string;
+    confirmPassword: string;
+    // Step 1
     licenseNumber: string;
-    licenseImage: string;
-    idImage: string;
-    operatorName?: string;   // ▼ NEW
-    status: RegStatus;
-    submittedAt: number;
+    operatorName: string;
+    // Step 2
+    licenseImageUri: string | null;
+    idImageUri: string | null;
+    // Step 3
+    agreedToTos: boolean;
 }
 
-function timeAgo(ts: number) {
-    const d = Date.now() - ts, m = Math.floor(d/60000), h = Math.floor(d/3600000), dy = Math.floor(d/86400000);
-    if (m < 1) return "just now"; if (m < 60) return `${m}m ago`; if (h < 24) return `${h}h ago`; return `${dy}d ago`;
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const STEP_LABELS = ["Account", "License", "Documents", "Review & Submit"];
+
+async function pickImage(): Promise<string | null> {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") {
+        Alert.alert("Permission required", "Please allow access to your photo library.");
+        return null;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.6,
+        base64: true,           // stored in Realtime DB as data URI
+        allowsEditing: true,
+        aspect: [4, 3],
+    });
+    if (result.canceled || !result.assets[0]) return null;
+    const { base64, uri, mimeType } = result.assets[0];
+    // Prefer base64 so it survives across devices; fall back to local URI
+    return base64
+        ? `data:${mimeType ?? "image/jpeg"};base64,${base64}`
+        : uri;
 }
 
-const STATUS_CFG = {
-    pending:  { label: "Pending",  color: "#d97706", bg: "#fef3c7", dot: "#f59e0b" },
-    approved: { label: "Approved", color: "#15803d", bg: "#dcfce7", dot: "#22c55e" },
-    rejected: { label: "Rejected", color: "#dc2626", bg: "#fee2e2", dot: "#ef4444" },
-};
+// ─── Step Components ──────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CREATE DRIVER MODAL (unchanged)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function CreateDriverModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-    const [name, setName]         = useState("");
-    const [email, setEmail]       = useState("");
-    const [password, setPassword] = useState("");
-    const [plate, setPlate]       = useState("");
-    const [opName, setOpName]     = useState(""); // ▼ NEW
-    const [loading, setLoading]   = useState(false);
-
-    const handleCreate = async () => {
-        if (!name.trim() || !email.trim() || !password || !plate.trim() || !opName.trim()) {
-            Alert.alert("Missing Fields", "Please fill in all fields."); return;
-        }
-        if (password.length < 6) { Alert.alert("Weak Password", "Password must be at least 6 characters."); return; }
-        setLoading(true);
-        try {
-            const cred = await createUserWithEmailAndPassword(auth, email, password);
-            const uid  = cred.user.uid;
-            await set(ref(db, `users/${uid}`), {
-                username: name, email, role: "driver",
-                operatorName: opName.trim(), // ▼ NEW
-                createdAt: Date.now(), createdByAdmin: true,
-            });
-            await set(ref(db, `jeep_info/${uid}`), {
-                driverName: name, plate: plate.toUpperCase(),
-                route: "Balacbac To Town",
-                operatorName: opName.trim(), // ▼ NEW
-                updatedAt: Date.now(),
-            });
-            Alert.alert("✅ Driver Created", `${name} has been registered as a driver and can now log in.`);
-            setName(""); setEmail(""); setPassword(""); setPlate(""); setOpName("");
-            onClose();
-        } catch (err: any) {
-            if (err.code === "auth/email-already-in-use") Alert.alert("Email Taken", "This email is already registered.");
-            else Alert.alert("Error", err.message ?? "Something went wrong.");
-        } finally { setLoading(false); }
-    };
-
+function StepIndicator({ step }: { step: number }) {
     return (
-        <Modal visible={visible} transparent animationType="slide">
-            <View style={cs.overlay}>
-                <View style={cs.sheet}>
-                    <View style={cs.handle} />
-                    <View style={cs.hdr}>
-                        <View style={cs.hdrIcon}><UserPlus color="#15803d" size={22} /></View>
-                        <View style={{ flex: 1 }}>
-                            <Text style={cs.hdrTitle}>Create Driver Account</Text>
-                            <Text style={cs.hdrSub}>Admin-created — instant access</Text>
-                        </View>
-                        <TouchableOpacity onPress={onClose} style={cs.closeBtn}><X color="#6b7280" size={20} /></TouchableOpacity>
+        <View style={st.indicatorRow}>
+            {STEP_LABELS.map((label, i) => (
+                <View key={i} style={st.indicatorItem}>
+                    <View style={[st.indicatorDot, i <= step && st.indicatorDotActive]}>
+                        {i < step
+                            ? <Check color="white" size={12} />
+                            : <Text style={[st.indicatorNum, i === step && { color: "white" }]}>{i + 1}</Text>
+                        }
                     </View>
-
-                    {[
-                        { label: "Full Name",        icon: <User color="#9ca3af" size={15} />,       value: name,     onChange: setName,     cap: "words" as any,       placeholder: "e.g. Juan dela Cruz" },
-                        { label: "Email",            icon: <Mail color="#9ca3af" size={15} />,       value: email,    onChange: setEmail,    cap: "none" as any,        kb: "email-address" as any, placeholder: "driver@email.com" },
-                        { label: "Password",         icon: <Lock color="#9ca3af" size={15} />,       value: password, onChange: setPassword, secure: true,              placeholder: "At least 6 characters" },
-                        { label: "Plate Number",     icon: <FileText color="#9ca3af" size={15} />,  value: plate,    onChange: setPlate,    cap: "characters" as any,  placeholder: "e.g. ABC 1234" },
-                        // ▼ NEW field
-                        { label: "Operator Name",    icon: <Building2 color="#9ca3af" size={15} />, value: opName,   onChange: setOpName,   cap: "words" as any,       placeholder: "e.g. Juan Dela Cruz Transport" },
-                    ].map((f, i) => (
-                        <View key={i} style={cs.field}>
-                            <Text style={cs.fieldLbl}>{f.label}</Text>
-                            <View style={cs.fieldInput}>
-                                {f.icon}
-                                <TextInput
-                                    value={f.value} onChangeText={f.onChange}
-                                    placeholder={f.placeholder} placeholderTextColor="#d1d5db"
-                                    style={cs.fieldTxt} secureTextEntry={f.secure}
-                                    autoCapitalize={f.cap ?? "sentences"}
-                                    keyboardType={f.kb ?? "default"}
-                                />
-                            </View>
-                        </View>
-                    ))}
-
-                    <TouchableOpacity style={[cs.createBtn, loading && { opacity: 0.6 }]} onPress={handleCreate} disabled={loading} activeOpacity={0.85}>
-                        {loading ? <ActivityIndicator color="white" /> : <><UserPlus color="white" size={18} /><Text style={cs.createBtnTxt}>Create Driver Account</Text></>}
-                    </TouchableOpacity>
+                    <Text style={[st.indicatorLabel, i === step && st.indicatorLabelActive]} numberOfLines={1}>
+                        {label}
+                    </Text>
+                    {i < STEP_LABELS.length - 1 && (
+                        <View style={[st.indicatorLine, i < step && st.indicatorLineActive]} />
+                    )}
                 </View>
-            </View>
-        </Modal>
+            ))}
+        </View>
     );
 }
 
-const cs = StyleSheet.create({
-    overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
-    sheet:   { backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 44 },
-    handle:  { width: 40, height: 5, backgroundColor: "#e5e7eb", borderRadius: 3, alignSelf: "center", marginBottom: 20 },
-    hdr:     { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 20 },
-    hdrIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: "#f0fdf4", alignItems: "center", justifyContent: "center" },
-    hdrTitle:{ fontSize: 17, fontWeight: "800", color: "#111827" },
-    hdrSub:  { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    closeBtn:{ padding: 8, backgroundColor: "#f3f4f6", borderRadius: 12 },
-    field:   { marginBottom: 14 },
-    fieldLbl:{ fontSize: 11, fontWeight: "700", color: "#9ca3af", textTransform: "uppercase", marginBottom: 6 },
-    fieldInput:{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#f9fafb", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: "#e5e7eb" },
-    fieldTxt:{ flex: 1, fontSize: 15, color: "#111827" },
-    createBtn:{ backgroundColor: "#15803d", borderRadius: 14, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 4 },
-    createBtnTxt:{ color: "white", fontWeight: "800", fontSize: 15 },
-});
+function FieldLabel({ children }: { children: React.ReactNode }) {
+    return <Text style={st.fieldLabel}>{children}</Text>;
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN SCREEN
-// ─────────────────────────────────────────────────────────────────────────────
-
-export default function AdminRegistrations() {
-    const [registrations, setRegistrations] = useState<Registration[]>([]);
-    const [loading, setLoading]             = useState(true);
-    const [selected, setSelected]           = useState<Registration | null>(null);
-    const [imagePreview, setImagePreview]   = useState<string | null>(null);
-    const [activeFilter, setActiveFilter]   = useState<RegStatus | "all">("pending");
-    const [processing, setProcessing]       = useState<string | null>(null);
-    const [createModalVisible, setCreateModalVisible] = useState(false);
-
-    useEffect(() => {
-        const unsub = onValue(ref(db, "pending_registrations"), (snap) => {
-            if (!snap.exists()) { setRegistrations([]); setLoading(false); return; }
-            const data = snap.val() as Record<string, Omit<Registration, "uid">>;
-            setRegistrations(
-                Object.entries(data)
-                    .map(([uid, v]) => ({ uid, ...v } as Registration))
-                    .sort((a, b) => b.submittedAt - a.submittedAt)
-            );
-            setLoading(false);
-        });
-        return () => unsub();
-    }, []);
-
-    // ▼ NEW: handleApprove now also writes operatorName to users + jeep_info
-    const handleApprove = (reg: Registration) => {
-        Alert.alert("Approve Driver", `Confirm approval for ${reg.fullName}?`, [
-            { text: "Cancel", style: "cancel" },
-            {
-                text: "Approve",
-                onPress: async () => {
-                    setProcessing(reg.uid);
-                    try {
-                        // Update role
-                        await update(ref(db, `users/${reg.uid}`), {
-                            role: "driver",
-                            operatorName: reg.operatorName ?? "", // ▼ NEW
-                        });
-
-                        // Mark registration approved
-                        await update(ref(db, `pending_registrations/${reg.uid}`), {
-                            status: "approved",
-                            reviewedAt: Date.now(),
-                        });
-
-                        // ▼ NEW: write operatorName into jeep_info (create stub if not exists)
-                        await update(ref(db, `jeep_info/${reg.uid}`), {
-                            driverName:   reg.fullName,
-                            operatorName: reg.operatorName ?? "",
-                            route:        "Balacbac To Town",
-                        });
-
-                        setSelected(null);
-                        Alert.alert("✅ Approved!", `${reg.fullName} is now a verified driver.`);
-                    } catch {
-                        Alert.alert("Error", "Could not approve.");
-                    } finally {
-                        setProcessing(null);
-                    }
-                },
-            },
-        ]);
-    };
-
-    const handleReject = (reg: Registration) => {
-        Alert.alert("Reject Application", `Reject ${reg.fullName}'s application?`, [
-            { text: "Cancel", style: "cancel" },
-            {
-                text: "Reject", style: "destructive",
-                onPress: async () => {
-                    setProcessing(reg.uid);
-                    try {
-                        await update(ref(db, `users/${reg.uid}`), { role: "rejected_driver" });
-                        await update(ref(db, `pending_registrations/${reg.uid}`), { status: "rejected", reviewedAt: Date.now() });
-                        setSelected(null);
-                    } catch {
-                        Alert.alert("Error", "Could not reject.");
-                    } finally {
-                        setProcessing(null);
-                    }
-                },
-            },
-        ]);
-    };
-
-    const filtered = activeFilter === "all" ? registrations : registrations.filter(r => r.status === activeFilter);
-    const counts = {
-        pending:  registrations.filter(r => r.status === "pending").length,
-        approved: registrations.filter(r => r.status === "approved").length,
-        rejected: registrations.filter(r => r.status === "rejected").length,
-    };
-
+function InputRow({
+    icon, value, onChangeText, placeholder, secure, keyboardType, cap, editable,
+}: {
+    icon: React.ReactNode;
+    value: string;
+    onChangeText: (v: string) => void;
+    placeholder: string;
+    secure?: boolean;
+    keyboardType?: any;
+    cap?: any;
+    editable?: boolean;
+}) {
     return (
-        <SafeAreaView style={s.container}>
-            <View style={s.header}>
-                <View>
-                    <Text style={s.title}>Applications</Text>
-                    <Text style={s.sub}>{counts.pending} pending review</Text>
-                </View>
-                <TouchableOpacity style={s.createBtn} onPress={() => setCreateModalVisible(true)} activeOpacity={0.8}>
-                    <UserPlus color="white" size={16} />
-                    <Text style={s.createBtnTxt}>Create Driver</Text>
-                </TouchableOpacity>
-            </View>
+        <View style={st.inputRow}>
+            {icon}
+            <TextInput
+                value={value}
+                onChangeText={onChangeText}
+                placeholder={placeholder}
+                placeholderTextColor="#9ca3af"
+                secureTextEntry={secure}
+                keyboardType={keyboardType ?? "default"}
+                autoCapitalize={cap ?? "sentences"}
+                editable={editable !== false}
+                style={st.input}
+            />
+        </View>
+    );
+}
 
-            {/* Status filter row */}
-            <View style={s.statRow}>
-                {(["pending", "approved", "rejected"] as RegStatus[]).map(status => {
-                    const cfg = STATUS_CFG[status];
-                    return (
+// ─── Main Screen ──────────────────────────────────────────────────────────────
+
+export default function DriverRegistration() {
+    const router = useRouter();
+    const [step, setStep] = useState(0);
+    const [submitting, setSubmitting] = useState(false);
+
+    const [form, setForm] = useState<FormState>({
+        fullName: "", email: "", password: "", confirmPassword: "",
+        licenseNumber: "", operatorName: "",
+        licenseImageUri: null, idImageUri: null,
+        agreedToTos: false,
+    });
+
+    const set_ = (key: keyof FormState, value: any) =>
+        setForm(prev => ({ ...prev, [key]: value }));
+
+    // ── Validation per step ───────────────────────────────────────────────────
+
+    const validateStep = (): boolean => {
+        if (step === 0) {
+            if (!form.fullName.trim())           { Alert.alert("Required", "Please enter your full name."); return false; }
+            if (!form.email.trim())              { Alert.alert("Required", "Please enter your email."); return false; }
+            if (form.password.length < 6)        { Alert.alert("Weak Password", "Password must be at least 6 characters."); return false; }
+            if (form.password !== form.confirmPassword) { Alert.alert("Mismatch", "Passwords do not match."); return false; }
+        }
+        if (step === 1) {
+            if (!form.licenseNumber.trim())      { Alert.alert("Required", "Please enter your license number."); return false; }
+            if (!form.operatorName.trim())       { Alert.alert("Required", "Please enter your operator / franchise name."); return false; }
+        }
+        if (step === 2) {
+            if (!form.licenseImageUri)           { Alert.alert("Required", "Please upload a photo of your driver's license."); return false; }
+            if (!form.idImageUri)                { Alert.alert("Required", "Please upload a photo of your government ID."); return false; }
+        }
+        if (step === 3) {
+            if (!form.agreedToTos)               { Alert.alert("Required", "You must agree to the Terms of Service to proceed."); return false; }
+        }
+        return true;
+    };
+
+    const next = () => { if (validateStep()) setStep(s => s + 1); };
+    const back = () => setStep(s => Math.max(0, s - 1));
+
+    // ── Submit ────────────────────────────────────────────────────────────────
+
+    const handleSubmit = async () => {
+        if (!validateStep()) return;
+        setSubmitting(true);
+        try {
+            // Create Firebase Auth account
+            const cred = await createUserWithEmailAndPassword(auth, form.email.trim(), form.password);
+            const uid  = cred.user.uid;
+
+            // Write user record (role = pending_driver so they can't log in yet)
+            await set(ref(db, `users/${uid}`), {
+                username:      form.fullName.trim(),
+                email:         form.email.trim(),
+                role:          "pending_driver",
+                operatorName:  form.operatorName.trim(),
+                createdAt:     Date.now(),
+            });
+
+            // Write pending registration for admin review
+            await set(ref(db, `pending_registrations/${uid}`), {
+                fullName:      form.fullName.trim(),
+                email:         form.email.trim(),
+                licenseNumber: form.licenseNumber.trim(),
+                operatorName:  form.operatorName.trim(),
+                licenseImage:  form.licenseImageUri ?? "",
+                idImage:       form.idImageUri ?? "",
+                status:        "pending",
+                submittedAt:   Date.now(),
+            });
+
+            Alert.alert(
+                "✅ Application Submitted!",
+                "Your application has been sent to the admin for review. You will be able to log in once your account is approved.",
+                [{ text: "Back to Login", onPress: () => router.replace("/login" as any) }]
+            );
+        } catch (err: any) {
+            if (err.code === "auth/email-already-in-use") {
+                Alert.alert("Email Taken", "An account with this email already exists. Please log in or use a different email.");
+            } else {
+                Alert.alert("Submission Error", err.message ?? "Something went wrong. Check your connection.");
+            }
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    // ── Render step content ───────────────────────────────────────────────────
+
+    const renderStep = () => {
+        switch (step) {
+
+            /* ── Step 0: Account Info ──────────────────────────────────────── */
+            case 0:
+                return (
+                    <View style={st.stepBody}>
+                        <Text style={st.stepTitle}>Create Your Account</Text>
+                        <Text style={st.stepSub}>This will be your driver login credentials.</Text>
+
+                        <FieldLabel>Full Name *</FieldLabel>
+                        <InputRow icon={<User color="#9ca3af" size={18} />} value={form.fullName}
+                            onChangeText={v => set_("fullName", v)} placeholder="e.g. Juan dela Cruz" cap="words" />
+
+                        <FieldLabel>Email Address *</FieldLabel>
+                        <InputRow icon={<Mail color="#9ca3af" size={18} />} value={form.email}
+                            onChangeText={v => set_("email", v)} placeholder="driver@email.com"
+                            keyboardType="email-address" cap="none" />
+
+                        <FieldLabel>Password * (min. 6 characters)</FieldLabel>
+                        <InputRow icon={<Lock color="#9ca3af" size={18} />} value={form.password}
+                            onChangeText={v => set_("password", v)} placeholder="Create a password" secure />
+
+                        <FieldLabel>Confirm Password *</FieldLabel>
+                        <InputRow icon={<Lock color="#9ca3af" size={18} />} value={form.confirmPassword}
+                            onChangeText={v => set_("confirmPassword", v)} placeholder="Re-enter password" secure />
+                    </View>
+                );
+
+            /* ── Step 1: Professional Info ─────────────────────────────────── */
+            case 1:
+                return (
+                    <View style={st.stepBody}>
+                        <Text style={st.stepTitle}>Professional Details</Text>
+                        <Text style={st.stepSub}>Enter your license and operator information.</Text>
+
+                        <FieldLabel>Driver&apos;s License Number *</FieldLabel>
+                        <InputRow icon={<CreditCard color="#9ca3af" size={18} />} value={form.licenseNumber}
+                            onChangeText={v => set_("licenseNumber", v)} placeholder="e.g. A01-23-456789"
+                            cap="characters" />
+
+                        <FieldLabel>Operator / Franchise Name *</FieldLabel>
+                        <InputRow icon={<Building2 color="#9ca3af" size={18} />} value={form.operatorName}
+                            onChangeText={v => set_("operatorName", v)} placeholder="e.g. Juan Dela Cruz Transport"
+                            cap="words" />
+
+                        <View style={st.infoBox}>
+                            <FileText color="#6b7280" size={14} />
+                            <Text style={st.infoTxt}>
+                                Your operator / franchise name must match your franchise certificate issued by the LTFRB.
+                            </Text>
+                        </View>
+                    </View>
+                );
+
+            /* ── Step 2: Documents ─────────────────────────────────────────── */
+            case 2:
+                return (
+                    <View style={st.stepBody}>
+                        <Text style={st.stepTitle}>Upload Documents</Text>
+                        <Text style={st.stepSub}>Photos must be clear and legible. Admin will verify these before approval.</Text>
+
+                        {/* License Photo */}
+                        <FieldLabel>Driver&apos;s License Photo *</FieldLabel>
                         <TouchableOpacity
-                            key={status}
-                            style={[s.statCard, { backgroundColor: cfg.bg }, activeFilter === status && s.statCardActive]}
-                            onPress={() => setActiveFilter(activeFilter === status ? "all" : status)}
+                            style={[st.uploadBox, form.licenseImageUri && st.uploadBoxDone]}
+                            onPress={async () => { const uri = await pickImage(); if (uri) set_("licenseImageUri", uri); }}
+                            activeOpacity={0.8}
                         >
-                            <View style={[s.statDot, { backgroundColor: cfg.dot }]} />
-                            <Text style={[s.statCount, { color: cfg.color }]}>{counts[status]}</Text>
-                            <Text style={[s.statLabel, { color: cfg.color }]}>
-                                {status.charAt(0).toUpperCase() + status.slice(1)}
+                            {form.licenseImageUri
+                                ? <Image source={{ uri: form.licenseImageUri }} style={st.uploadPreview} />
+                                : <>
+                                    <Camera color="#15803d" size={32} />
+                                    <Text style={st.uploadLabel}>Tap to upload license photo</Text>
+                                    <Text style={st.uploadHint}>Front side, clear and in focus</Text>
+                                  </>
+                            }
+                            {form.licenseImageUri && (
+                                <View style={st.uploadBadge}><Check color="white" size={14} /></View>
+                            )}
+                        </TouchableOpacity>
+
+                        {/* Government ID Photo */}
+                        <FieldLabel>Government ID Photo *</FieldLabel>
+                        <TouchableOpacity
+                            style={[st.uploadBox, form.idImageUri && st.uploadBoxDone]}
+                            onPress={async () => { const uri = await pickImage(); if (uri) set_("idImageUri", uri); }}
+                            activeOpacity={0.8}
+                        >
+                            {form.idImageUri
+                                ? <Image source={{ uri: form.idImageUri }} style={st.uploadPreview} />
+                                : <>
+                                    <Camera color="#15803d" size={32} />
+                                    <Text style={st.uploadLabel}>Tap to upload government ID</Text>
+                                    <Text style={st.uploadHint}>Passport, PhilSys, SSS, etc.</Text>
+                                  </>
+                            }
+                            {form.idImageUri && (
+                                <View style={st.uploadBadge}><Check color="white" size={14} /></View>
+                            )}
+                        </TouchableOpacity>
+
+                        <View style={st.infoBox}>
+                            <Shield color="#6b7280" size={14} />
+                            <Text style={st.infoTxt}>
+                                Your documents are only used for identity verification and are kept securely.
+                                We do not share your personal data with third parties.
+                            </Text>
+                        </View>
+                    </View>
+                );
+
+            /* ── Step 3: Terms of Service ──────────────────────────────────── */
+            case 3:
+                return (
+                    <View style={st.stepBody}>
+                        <Text style={st.stepTitle}>Terms of Service</Text>
+                        <Text style={st.stepSub}>Please read before submitting your application.</Text>
+
+                        <View style={st.tosBox}>
+                            <ScrollView style={{ maxHeight: 320 }} showsVerticalScrollIndicator>
+                                <Text style={st.tosSection}>1. Information We Collect</Text>
+                                <Text style={st.tosPara}>
+                                    By applying as a driver on JeepRoute, you voluntarily provide the following
+                                    personal information:
+                                </Text>
+                                {[
+                                    "Full name",
+                                    "Email address",
+                                    "Driver's license number",
+                                    "Photo of your driver's license",
+                                    "Photo of a government-issued ID",
+                                    "Operator / franchise name",
+                                ].map(item => (
+                                    <Text key={item} style={st.tosBullet}>• {item}</Text>
+                                ))}
+
+                                <Text style={st.tosSection}>2. How We Use Your Information</Text>
+                                <Text style={st.tosPara}>
+                                    Your information is used solely to verify your identity and eligibility as a jeepney
+                                    driver on the Balacbac–Town route. The admin will review your submitted documents
+                                    before approving your account.
+                                </Text>
+
+                                <Text style={st.tosSection}>3. Data Storage</Text>
+                                <Text style={st.tosPara}>
+                                    Your data is stored securely in Firebase (Google Cloud). Access is restricted to
+                                    authorized system administrators only.
+                                </Text>
+
+                                <Text style={st.tosSection}>4. Your Rights</Text>
+                                <Text style={st.tosPara}>
+                                    You may request the deletion of your account and associated data at any time by
+                                    contacting the system administrator.
+                                </Text>
+
+                                <Text style={st.tosSection}>5. Location Data</Text>
+                                <Text style={st.tosPara}>
+                                    Once approved and actively driving, your real-time GPS location will be shared with
+                                    commuters using the app. Location sharing is only active while you have a trip
+                                    in progress.
+                                </Text>
+
+                                <Text style={st.tosSection}>6. Agreement</Text>
+                                <Text style={st.tosPara}>
+                                    By checking the box below, you confirm that all information provided is accurate and
+                                    that you agree to these terms.
+                                </Text>
+                            </ScrollView>
+                        </View>
+
+                        {/* Summary of submitted info */}
+                        <View style={st.summaryBox}>
+                            <Text style={st.summaryTitle}>Submitting as:</Text>
+                            <Text style={st.summaryRow}><Text style={st.summaryKey}>Name: </Text>{form.fullName}</Text>
+                            <Text style={st.summaryRow}><Text style={st.summaryKey}>Email: </Text>{form.email}</Text>
+                            <Text style={st.summaryRow}><Text style={st.summaryKey}>License #: </Text>{form.licenseNumber}</Text>
+                            <Text style={st.summaryRow}><Text style={st.summaryKey}>Operator: </Text>{form.operatorName}</Text>
+                            <Text style={st.summaryRow}>
+                                <Text style={st.summaryKey}>Documents: </Text>
+                                {form.licenseImageUri ? "✅" : "❌"} License · {form.idImageUri ? "✅" : "❌"} Gov&apos;t ID
+                            </Text>
+                        </View>
+
+                        <TouchableOpacity
+                            style={st.tosCheckRow}
+                            onPress={() => set_("agreedToTos", !form.agreedToTos)}
+                            activeOpacity={0.8}
+                        >
+                            <View style={[st.checkbox, form.agreedToTos && st.checkboxChecked]}>
+                                {form.agreedToTos && <Check color="white" size={14} />}
+                            </View>
+                            <Text style={st.tosCheckLabel}>
+                                I have read and agree to the Terms of Service and Privacy Policy.
                             </Text>
                         </TouchableOpacity>
-                    );
-                })}
+                    </View>
+                );
+
+            default:
+                return null;
+        }
+    };
+
+    // ── Main Render ───────────────────────────────────────────────────────────
+
+    return (
+        <SafeAreaView style={st.container}>
+            {/* Header */}
+            <View style={st.header}>
+                <TouchableOpacity
+                    onPress={() => (step === 0 ? router.back() : back())}
+                    style={st.backBtn}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                    <ArrowLeft color="#374151" size={22} />
+                </TouchableOpacity>
+                <View style={{ flex: 1 }}>
+                    <Text style={st.headerTitle}>Driver Application</Text>
+                    <Text style={st.headerSub}>Step {step + 1} of {STEP_LABELS.length}</Text>
+                </View>
             </View>
 
-            {loading ? <ActivityIndicator color="#15803d" style={{ marginTop: 40 }} /> : (
-                <ScrollView contentContainerStyle={s.list}>
-                    {filtered.length === 0 ? (
-                        <View style={s.emptyBox}>
-                            <Text style={{ fontSize: 40, marginBottom: 12 }}>📋</Text>
-                            <Text style={s.emptyText}>No {activeFilter === "all" ? "" : activeFilter} applications.</Text>
-                        </View>
-                    ) : filtered.map(reg => {
-                        const cfg = STATUS_CFG[reg.status];
-                        return (
-                            <TouchableOpacity key={reg.uid} style={s.card} onPress={() => setSelected(reg)} activeOpacity={0.75}>
-                                <View style={s.avatar}>
-                                    <Text style={s.avatarText}>{reg.fullName?.charAt(0)?.toUpperCase() ?? "D"}</Text>
-                                </View>
-                                <View style={s.cardInfo}>
-                                    <Text style={s.cardName}>{reg.fullName}</Text>
-                                    <Text style={s.cardEmail}>{reg.email}</Text>
-                                    {/* ▼ NEW: show operator name on the card */}
-                                    {!!reg.operatorName && (
-                                        <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 }}>
-                                            <Building2 size={10} color="#6b7280" />
-                                            <Text style={{ fontSize: 11, color: "#6b7280" }}>{reg.operatorName}</Text>
-                                        </View>
-                                    )}
-                                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 3 }}>
-                                        <Clock size={10} color="#9ca3af" />
-                                        <Text style={{ fontSize: 10, color: "#9ca3af" }}>{timeAgo(reg.submittedAt)}</Text>
-                                    </View>
-                                </View>
-                                <View style={[s.statusBadge, { backgroundColor: cfg.bg }]}>
-                                    <View style={[s.statusDot, { backgroundColor: cfg.dot }]} />
-                                    <Text style={[s.statusText, { color: cfg.color }]}>{cfg.label}</Text>
-                                </View>
+            <StepIndicator step={step} />
+
+            <KeyboardAvoidingView
+                style={{ flex: 1 }}
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
+            >
+                <ScrollView
+                    contentContainerStyle={st.scrollContent}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}
+                >
+                    {renderStep()}
+
+                    {/* Navigation buttons */}
+                    <View style={st.navRow}>
+                        {step < 3 ? (
+                            <TouchableOpacity style={st.nextBtn} onPress={next} activeOpacity={0.85}>
+                                <Text style={st.nextBtnTxt}>Continue</Text>
+                                <ArrowRight color="white" size={18} />
                             </TouchableOpacity>
-                        );
-                    })}
-                </ScrollView>
-            )}
-
-            {/* ── Detail modal ── */}
-            <Modal visible={!!selected} animationType="slide" transparent>
-                <View style={s.modalOverlay}>
-                    <View style={[s.modalSheet, { height: height * 0.90 }]}>
-                        <View style={s.sheetHandle} />
-                        {selected && (
-                            <>
-                                <View style={s.mHdr}>
-                                    <View style={s.mAvatar}>
-                                        <Text style={s.mAvatarTxt}>{selected.fullName?.charAt(0)?.toUpperCase()}</Text>
-                                    </View>
-                                    <View style={{ flex: 1 }}>
-                                        <Text style={s.mName}>{selected.fullName}</Text>
-                                        <Text style={s.mEmail}>{selected.email}</Text>
-                                    </View>
-                                    <TouchableOpacity onPress={() => setSelected(null)} style={s.closeBtn}>
-                                        <X color="#6b7280" size={20} />
-                                    </TouchableOpacity>
-                                </View>
-
-                                <ScrollView showsVerticalScrollIndicator={false}>
-                                    {/* License number */}
-                                    <View style={s.infoRow}>
-                                        <View style={[s.infoIcon, { backgroundColor: "#dbeafe" }]}>
-                                            <CreditCard color="#3b82f6" size={18} />
-                                        </View>
-                                        <View>
-                                            <Text style={s.infoLbl}>License Number</Text>
-                                            <Text style={s.infoVal}>{selected.licenseNumber}</Text>
-                                        </View>
-                                    </View>
-
-                                    {/* ▼ NEW: Operator info row */}
-                                    <View style={s.infoRow}>
-                                        <View style={[s.infoIcon, { backgroundColor: "#eff6ff" }]}>
-                                            <Building2 color="#2563eb" size={18} />
-                                        </View>
-                                        <View style={{ flex: 1 }}>
-                                            <Text style={s.infoLbl}>Operator / Franchise</Text>
-                                            <Text style={s.infoVal}>
-                                                {selected.operatorName || "Not provided"}
-                                            </Text>
-                                        </View>
-                                    </View>
-
-                                    {/* Submitted date */}
-                                    <View style={s.infoRow}>
-                                        <View style={[s.infoIcon, { backgroundColor: "#f0fdf4" }]}>
-                                            <Clock color="#15803d" size={18} />
-                                        </View>
-                                        <View>
-                                            <Text style={s.infoLbl}>Submitted</Text>
-                                            <Text style={s.infoVal}>
-                                                {new Date(selected.submittedAt).toLocaleDateString("en-PH", {
-                                                    year: "numeric", month: "long", day: "numeric",
-                                                })}
-                                            </Text>
-                                        </View>
-                                    </View>
-
-                                    {/* Documents */}
-                                    <Text style={s.docSec}>Submitted Documents</Text>
-                                    <View style={s.docsRow}>
-                                        {[
-                                            { uri: selected.licenseImage, label: "Driver's License" },
-                                            { uri: selected.idImage,      label: "Government ID" },
-                                        ].map((doc, i) => (
-                                            <TouchableOpacity key={i} style={s.docBox} onPress={() => setImagePreview(doc.uri)}>
-                                                <Image source={{ uri: doc.uri }} style={s.docThumb} />
-                                                <View style={s.docLbl}>
-                                                    <FileText color="#3b82f6" size={12} />
-                                                    <Text style={s.docLblTxt}>{doc.label}</Text>
-                                                </View>
-                                                <View style={s.viewOverlay}><Eye color="white" size={16} /></View>
-                                            </TouchableOpacity>
-                                        ))}
-                                    </View>
-
-                                    {/* Actions */}
-                                    {selected.status === "pending" && (
-                                        <View style={s.actionRow}>
-                                            <TouchableOpacity style={s.rejectBtn} onPress={() => handleReject(selected)} disabled={!!processing}>
-                                                <XCircle color="#dc2626" size={20} />
-                                                <Text style={s.rejectTxt}>Reject</Text>
-                                            </TouchableOpacity>
-                                            <TouchableOpacity style={s.approveBtn} onPress={() => handleApprove(selected)} disabled={!!processing}>
-                                                {processing === selected.uid
-                                                    ? <ActivityIndicator color="white" />
-                                                    : <><CheckCircle color="white" size={20} /><Text style={s.approveTxt}>Approve</Text></>
-                                                }
-                                            </TouchableOpacity>
-                                        </View>
-                                    )}
-                                    {selected.status !== "pending" && (
-                                        <View style={[s.statusResult, { backgroundColor: STATUS_CFG[selected.status].bg }]}>
-                                            {selected.status === "approved"
-                                                ? <CheckCircle color="#15803d" size={20} />
-                                                : <XCircle color="#dc2626" size={20} />
-                                            }
-                                            <Text style={[s.statusResultTxt, { color: STATUS_CFG[selected.status].color }]}>
-                                                This application has been {selected.status}.
-                                            </Text>
-                                        </View>
-                                    )}
-                                </ScrollView>
-                            </>
+                        ) : (
+                            <TouchableOpacity
+                                style={[st.nextBtn, st.submitBtn, submitting && { opacity: 0.6 }]}
+                                onPress={handleSubmit}
+                                disabled={submitting}
+                                activeOpacity={0.85}
+                            >
+                                {submitting
+                                    ? <ActivityIndicator color="white" />
+                                    : <><Check color="white" size={18} /><Text style={st.nextBtnTxt}>Submit Application</Text></>
+                                }
+                            </TouchableOpacity>
                         )}
                     </View>
-                </View>
-            </Modal>
-
-            {/* Image preview */}
-            <Modal visible={!!imagePreview} transparent animationType="fade">
-                <View style={s.imgOverlay}>
-                    <TouchableOpacity style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }} onPress={() => setImagePreview(null)} />
-                    {imagePreview && <Image source={{ uri: imagePreview }} style={s.imgFull} resizeMode="contain" />}
-                    <TouchableOpacity style={s.imgClose} onPress={() => setImagePreview(null)}>
-                        <X color="white" size={24} />
-                    </TouchableOpacity>
-                </View>
-            </Modal>
-
-            {/* Create driver modal */}
-            <CreateDriverModal visible={createModalVisible} onClose={() => setCreateModalVisible(false)} />
+                </ScrollView>
+            </KeyboardAvoidingView>
         </SafeAreaView>
     );
 }
 
-const s = StyleSheet.create({
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const st = StyleSheet.create({
     container:  { flex: 1, backgroundColor: "#f9fafb" },
-    header:     { backgroundColor: "#fff", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#e5e7eb", flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-    title:      { fontSize: 22, fontWeight: "900", color: "#15803d" },
-    sub:        { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    createBtn:  { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#15803d", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8 },
-    createBtnTxt: { color: "white", fontWeight: "700", fontSize: 13 },
 
-    statRow:      { flexDirection: "row", padding: 16, gap: 10 },
-    statCard:     { flex: 1, borderRadius: 14, padding: 12, alignItems: "center", gap: 4, borderWidth: 2, borderColor: "transparent" },
-    statCardActive:{ borderColor: "#15803d" },
-    statDot:      { width: 8, height: 8, borderRadius: 4 },
-    statCount:    { fontSize: 22, fontWeight: "900" },
-    statLabel:    { fontSize: 11, fontWeight: "700" },
+    header:     { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 16, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#e5e7eb", gap: 12 },
+    backBtn:    { padding: 4 },
+    headerTitle:{ fontSize: 18, fontWeight: "800", color: "#111827" },
+    headerSub:  { fontSize: 12, color: "#6b7280", marginTop: 1 },
 
-    list:      { padding: 16, gap: 10 },
-    emptyBox:  { alignItems: "center", paddingVertical: 60 },
-    emptyText: { color: "#9ca3af", fontWeight: "600", fontSize: 15 },
+    // Step indicator
+    indicatorRow:       { flexDirection: "row", paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#f3f4f6" },
+    indicatorItem:      { flex: 1, alignItems: "center", position: "relative" },
+    indicatorDot:       { width: 24, height: 24, borderRadius: 12, backgroundColor: "#e5e7eb", alignItems: "center", justifyContent: "center", marginBottom: 4 },
+    indicatorDotActive: { backgroundColor: "#15803d" },
+    indicatorNum:       { fontSize: 11, fontWeight: "700", color: "#9ca3af" },
+    indicatorLabel:     { fontSize: 9, color: "#9ca3af", fontWeight: "600", textAlign: "center" },
+    indicatorLabelActive:{ color: "#15803d" },
+    indicatorLine:      { position: "absolute", top: 12, left: "60%", right: "-60%", height: 2, backgroundColor: "#e5e7eb" },
+    indicatorLineActive:{ backgroundColor: "#15803d" },
 
-    card:       { backgroundColor: "#fff", borderRadius: 16, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#e5e7eb", shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 4, elevation: 2 },
-    avatar:     { width: 46, height: 46, borderRadius: 23, backgroundColor: "#dcfce7", alignItems: "center", justifyContent: "center" },
-    avatarText: { fontSize: 20, fontWeight: "800", color: "#15803d" },
-    cardInfo:   { flex: 1 },
-    cardName:   { fontSize: 15, fontWeight: "700", color: "#111827" },
-    cardEmail:  { fontSize: 12, color: "#6b7280", marginTop: 1 },
-    statusBadge:{ flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10 },
-    statusDot:  { width: 6, height: 6, borderRadius: 3 },
-    statusText: { fontSize: 11, fontWeight: "700" },
+    scrollContent: { padding: 20, paddingBottom: 40 },
 
-    modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-    modalSheet:   { backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40 },
-    sheetHandle:  { width: 40, height: 5, backgroundColor: "#e5e7eb", borderRadius: 3, alignSelf: "center", marginBottom: 20 },
-    mHdr:         { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 20 },
-    mAvatar:      { width: 56, height: 56, borderRadius: 28, backgroundColor: "#dcfce7", alignItems: "center", justifyContent: "center" },
-    mAvatarTxt:   { fontSize: 24, fontWeight: "800", color: "#15803d" },
-    mName:        { fontSize: 20, fontWeight: "800", color: "#111827" },
-    mEmail:       { fontSize: 13, color: "#6b7280", marginTop: 2 },
-    closeBtn:     { padding: 8, backgroundColor: "#f3f4f6", borderRadius: 12 },
+    // Step body
+    stepBody:  { marginBottom: 8 },
+    stepTitle: { fontSize: 22, fontWeight: "800", color: "#111827", marginBottom: 6 },
+    stepSub:   { fontSize: 13, color: "#6b7280", marginBottom: 24, lineHeight: 20 },
 
-    infoRow:  { flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#f3f4f6" },
-    infoIcon: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-    infoLbl:  { fontSize: 11, color: "#9ca3af", fontWeight: "600", textTransform: "uppercase" },
-    infoVal:  { fontSize: 15, fontWeight: "700", color: "#111827", marginTop: 2 },
+    // Field
+    fieldLabel: { fontSize: 11, fontWeight: "700", color: "#374151", textTransform: "uppercase", marginBottom: 8, marginTop: 16 },
+    inputRow:   { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 14, borderWidth: 1, borderColor: "#e5e7eb" },
+    input:      { flex: 1, fontSize: 15, color: "#111827" },
 
-    docSec:   { fontSize: 14, fontWeight: "800", color: "#111827", marginTop: 20, marginBottom: 12 },
-    docsRow:  { flexDirection: "row", gap: 12, marginBottom: 24 },
-    docBox:   { flex: 1, height: 130, borderRadius: 14, overflow: "hidden", borderWidth: 1, borderColor: "#e5e7eb" },
-    docThumb: { width: "100%", height: "100%", resizeMode: "cover" },
-    docLbl:   { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: "rgba(255,255,255,.92)", paddingVertical: 6, paddingHorizontal: 8, flexDirection: "row", alignItems: "center", gap: 4 },
-    docLblTxt:{ fontSize: 10, fontWeight: "700", color: "#374151" },
-    viewOverlay:{ position: "absolute", top: 8, right: 8, backgroundColor: "rgba(0,0,0,.4)", borderRadius: 8, padding: 6 },
+    // Upload
+    uploadBox:  { backgroundColor: "#fff", borderRadius: 16, borderWidth: 2, borderColor: "#e5e7eb", borderStyle: "dashed", height: 140, alignItems: "center", justifyContent: "center", overflow: "hidden" },
+    uploadBoxDone: { borderStyle: "solid", borderColor: "#15803d" },
+    uploadPreview: { width: "100%", height: "100%", resizeMode: "cover" },
+    uploadLabel:{ fontSize: 14, fontWeight: "700", color: "#15803d", marginTop: 10 },
+    uploadHint: { fontSize: 11, color: "#9ca3af", marginTop: 4 },
+    uploadBadge:{ position: "absolute", top: 8, right: 8, backgroundColor: "#15803d", borderRadius: 12, padding: 4 },
 
-    actionRow:  { flexDirection: "row", gap: 12 },
-    rejectBtn:  { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#fee2e2", borderRadius: 14, paddingVertical: 16 },
-    rejectTxt:  { color: "#dc2626", fontWeight: "700", fontSize: 15 },
-    approveBtn: { flex: 1.5, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#15803d", borderRadius: 14, paddingVertical: 16 },
-    approveTxt: { color: "white", fontWeight: "700", fontSize: 15 },
+    // Info box
+    infoBox:   { flexDirection: "row", alignItems: "flex-start", gap: 8, backgroundColor: "#f8fafc", borderRadius: 12, padding: 12, marginTop: 20 },
+    infoTxt:   { flex: 1, fontSize: 12, color: "#6b7280", lineHeight: 18 },
 
-    statusResult:   { flexDirection: "row", alignItems: "center", gap: 10, borderRadius: 14, padding: 16 },
-    statusResultTxt:{ fontSize: 14, fontWeight: "700" },
+    // ToS
+    tosBox:    { backgroundColor: "#fff", borderRadius: 14, borderWidth: 1, borderColor: "#e5e7eb", padding: 16, marginBottom: 16 },
+    tosSection:{ fontSize: 13, fontWeight: "800", color: "#111827", marginTop: 14, marginBottom: 4 },
+    tosPara:   { fontSize: 12, color: "#6b7280", lineHeight: 18, marginBottom: 4 },
+    tosBullet: { fontSize: 12, color: "#6b7280", lineHeight: 18, paddingLeft: 8 },
 
-    imgOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,.92)", alignItems: "center", justifyContent: "center" },
-    imgFull:    { width: width - 32, height: height * 0.65 },
-    imgClose:   { position: "absolute", top: 52, right: 20, backgroundColor: "rgba(255,255,255,.15)", borderRadius: 20, padding: 10 },
+    summaryBox:{ backgroundColor: "#f0fdf4", borderRadius: 14, padding: 14, marginBottom: 16 },
+    summaryTitle:{ fontSize: 12, fontWeight: "800", color: "#15803d", marginBottom: 8 },
+    summaryRow: { fontSize: 12, color: "#374151", marginBottom: 4, lineHeight: 18 },
+    summaryKey: { fontWeight: "700" },
+
+    tosCheckRow:  { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: 4 },
+    checkbox:     { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: "#d1d5db", alignItems: "center", justifyContent: "center", marginTop: 2, flexShrink: 0 },
+    checkboxChecked: { backgroundColor: "#15803d", borderColor: "#15803d" },
+    tosCheckLabel:{ flex: 1, fontSize: 13, color: "#374151", lineHeight: 20 },
+
+    // Nav
+    navRow:    { marginTop: 28 },
+    nextBtn:   { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#15803d", borderRadius: 16, paddingVertical: 16 },
+    nextBtnTxt:{ color: "white", fontWeight: "800", fontSize: 16 },
+    submitBtn: { backgroundColor: "#166534" },
 });

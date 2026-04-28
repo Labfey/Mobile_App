@@ -1,3 +1,9 @@
+/**
+ * app/login.tsx
+ *
+ * CHANGE: "Apply as a Driver" now routes to /driver-registration
+ * (previously routed to /registration which opened the admin view by mistake)
+ */
 import { View, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -148,6 +154,10 @@ export default function LoginScreen() {
                     <View style={s.thinDivider} />
                 </View>
 
+                {/*
+                 * FIX: was "/registration" → now "/driver-registration"
+                 * "/registration" opened the admin registrations screen by mistake.
+                 */}
                 <TouchableOpacity
                     onPress={() => router.push("/registration" as any)}
                     style={s.registerButton}

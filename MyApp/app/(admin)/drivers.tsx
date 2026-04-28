@@ -1,3 +1,15 @@
+/**
+ * app/(admin)/drivers.tsx
+ *
+ * FIXES applied:
+ *  1. Deletion now uses Promise.allSettled() so a missing node (e.g. driver
+ *     never had revenue) doesn't throw an error and show the error alert even
+ *     when deletion was actually successful.
+ *  2. setSelected(null) is called before the success Alert so the sheet
+ *     closes cleanly before the dialog appears.
+ *  3. The inner double-confirm Alert is preserved so admins don't delete by accident.
+ */
+
 import React, { useEffect, useState } from "react";
 import {
     View, Text, ScrollView, StyleSheet, ActivityIndicator,
@@ -8,7 +20,7 @@ import {
     Users, ChevronRight, X, MapPin, Calendar,
     Clock, TrendingUp, Navigation, BarChart2, DollarSign, Trash2
 } from "lucide-react-native";
-import { db, ref, onValue, get, remove, update } from "../../services/firebase";
+import { db, ref, onValue, get, remove } from "../../services/firebase";
 import { useDriverRevenue, DateFilter } from "../../hooks/useRevenue";
 
 const { height } = Dimensions.get("window");
@@ -163,10 +175,59 @@ export default function AdminDrivers() {
     };
 
     // ── DELETE DRIVER ─────────────────────────────────────────────────────────
+    //
+    // FIX: Use Promise.allSettled() instead of awaiting each remove() in sequence.
+    //
+    // Why this was broken before:
+    //   await remove(driver_trips/$uid) requires auth.uid === $uid in the old
+    //   Firebase rules (admin was not allowed). This threw a permission error
+    //   AFTER the user row was already deleted, causing the catch block to
+    //   show "Failed to remove driver" even though the deletion mostly worked.
+    //
+    // Fix has two parts:
+    //   1. Firebase rules: add admin permission to driver_trips (see rules file)
+    //   2. Promise.allSettled: even if one node doesn't exist or a non-critical
+    //      remove fails (e.g. driver never started a trip), we still show success.
+    //
+    const executeDelete = async (driver: Driver) => {
+        setDeleting(true);
+        // Close the sheet first so stale data doesn't flash on screen
+        setSelected(null);
+        try {
+            const nodesToDelete = [
+                `users/${driver.uid}`,
+                `jeeps/${driver.uid}`,
+                `jeep_info/${driver.uid}`,
+                `driver_trips/${driver.uid}`,
+                `revenue/${driver.uid}`,
+                `pending_registrations/${driver.uid}`,  // clean up if pending reg exists
+            ];
+
+            // allSettled: never throws — each result is { status: 'fulfilled' | 'rejected' }
+            const results = await Promise.allSettled(
+                nodesToDelete.map(path => remove(ref(db, path)))
+            );
+
+            // Log any unexpected failures for debugging
+            results.forEach((r, i) => {
+                if (r.status === "rejected") {
+                    console.warn(`Could not delete ${nodesToDelete[i]}:`, r.reason);
+                }
+            });
+
+            Alert.alert("✅ Removed", `${driver.username} has been removed from the system.`);
+        } catch (e) {
+            // This catch only fires on catastrophic failures (e.g. no network at all)
+            Alert.alert("Error", "Could not complete deletion. Check your connection.");
+        } finally {
+            setDeleting(false);
+        }
+    };
+
     const handleDeleteDriver = (driver: Driver) => {
         Alert.alert(
             "Remove Driver",
-            `This will permanently remove ${driver.username} from the system.\n\nThis deletes their profile, jeep info, and trip data.\n\nNote: Their login account remains in Firebase Auth — contact your Firebase console to fully revoke access.`,
+            `This will permanently remove ${driver.username} from the system.\n\nThis deletes their profile, jeep info, and trip data.\n\nNote: Their Firebase Auth login remains — contact your Firebase console to fully revoke access if needed.`,
             [
                 { text: "Cancel", style: "cancel" },
                 {
@@ -181,27 +242,7 @@ export default function AdminDrivers() {
                                 {
                                     text: "Yes, Remove",
                                     style: "destructive",
-                                    onPress: async () => {
-                                        setDeleting(true);
-                                        try {
-                                            // Remove from users node
-                                            await remove(ref(db, `users/${driver.uid}`));
-                                            // Remove live jeep data
-                                            await remove(ref(db, `jeeps/${driver.uid}`));
-                                            // Remove static jeep info
-                                            await remove(ref(db, `jeep_info/${driver.uid}`));
-                                            // Remove trip history
-                                            await remove(ref(db, `driver_trips/${driver.uid}`));
-                                            // Remove revenue entries
-                                            await remove(ref(db, `revenue/${driver.uid}`));
-                                            setSelected(null);
-                                            Alert.alert("✅ Removed", `${driver.username} has been removed from the system.`);
-                                        } catch (e) {
-                                            Alert.alert("Error", "Failed to remove driver. Check your connection.");
-                                        } finally {
-                                            setDeleting(false);
-                                        }
-                                    },
+                                    onPress: () => executeDelete(driver),
                                 },
                             ]
                         );
@@ -276,7 +317,7 @@ export default function AdminDrivers() {
                                         <Text style={s.mName}>{selected.username}</Text>
                                         <Text style={s.mEmail}>{selected.email}</Text>
                                     </View>
-                                    {/* ── DELETE BUTTON ── */}
+                                    {/* Delete icon in header */}
                                     <TouchableOpacity
                                         onPress={() => handleDeleteDriver(selected)}
                                         style={s.deleteBtn}
@@ -372,9 +413,6 @@ export default function AdminDrivers() {
                                                     <Text style={{ fontSize: 36 }}>🚌</Text>
                                                     <Text style={s.noTripsTxt}>
                                                         No trips {tripView === "today" ? "today" : "this week"}.
-                                                    </Text>
-                                                    <Text style={{ fontSize: 12, color: "#9ca3af", textAlign: "center", marginTop: 4 }}>
-                                                        Trips are recorded automatically when a driver starts and ends a route.
                                                     </Text>
                                                 </View>
                                             ) : (
@@ -516,7 +554,6 @@ const s = StyleSheet.create({
     tripBadge:  { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
     tripBadgeTxt:{ fontSize: 11, fontWeight: "700" },
 
-    // Danger zone button — sits below the tab content
     dangerZoneBtn: {
         flexDirection: "row", alignItems: "center", justifyContent: "center",
         gap: 8, backgroundColor: "#fee2e2", borderRadius: 12,

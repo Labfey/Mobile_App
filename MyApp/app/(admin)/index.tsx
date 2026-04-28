@@ -3,17 +3,18 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
     View, Text, ScrollView, TouchableOpacity,
     StyleSheet, ActivityIndicator, RefreshControl,
-    Modal, Dimensions,
+    Modal, Dimensions, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import {
     Bus, Users, CheckCircle, XCircle, LogOut, TrendingUp,
     X, ChevronRight, Clock, FileText, DollarSign,
-    Navigation, BarChart2, MapPin, Calendar,
+    Navigation, BarChart2, MapPin, Calendar, Trash2
 } from "lucide-react-native";
-import { auth, db, ref, onValue, get, signOut } from "../../services/firebase";
+import { auth, db, ref, onValue, get, signOut, remove } from "../../services/firebase";
 import { useDriverRevenue, DateFilter } from "../../hooks/useRevenue";
+import { useTheme } from "../ThemeContext";
 
 const { height: SCREEN_H } = Dimensions.get("window");
 
@@ -617,6 +618,7 @@ function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations
 
 export default function AdminDashboard() {
     const router = useRouter();
+    const { darkMode } = useTheme();
 
     const [loading, setLoading]           = useState(true);
     const [refreshing, setRefreshing]     = useState(false);
@@ -680,6 +682,16 @@ export default function AdminDashboard() {
     const onRefresh    = () => { setRefreshing(true); setupListeners(); };
     const selectedInfo = selectedJeep ? jeepInfo[selectedJeep.uid] : null;
 
+    const handleClearMap = () => {
+        Alert.alert("Clear Live Map", "This will remove all active ride requests and reset passenger markers for everyone. Continue?", [
+            { text: "Cancel", style: "cancel" },
+            { text: "Clear Map", style: "destructive", onPress: async () => {
+                await remove(ref(db, "ride_requests"));
+                Alert.alert("Success", "Live map data has been cleared.");
+            }}
+        ]);
+    };
+
     // When a driver is selected from the list modal: close the list, open detail
     const handleSelectDriver = (driver: Driver) => {
         setDriversModalOpen(false);
@@ -689,20 +701,27 @@ export default function AdminDashboard() {
 
     if (loading) {
         return (
-            <View style={s.loadingContainer}>
+            <View style={[s.loadingContainer, darkMode && { backgroundColor: "#0f172a" }]}>
                 <ActivityIndicator size="large" color="#15803d" />
-                <Text style={s.loadingText}>Loading Dashboard...</Text>
+                <Text style={[s.loadingText, darkMode && { color: "#94a3b8" }]}>Loading Dashboard...</Text>
             </View>
         );
     }
 
+    // Dynamic styles for Dark Mode
+    const themeContainer = darkMode ? { backgroundColor: "#0f172a" } : { backgroundColor: "#f9fafb" };
+    const themeHeader    = darkMode ? { backgroundColor: "#1e293b", borderBottomColor: "#334155" } : { backgroundColor: "#fff" };
+    const themeText      = darkMode ? { color: "#f1f5f9" } : { color: "#111827" };
+    const themeCard      = darkMode ? { backgroundColor: "#1e293b", borderColor: "#334155" } : { backgroundColor: "#fff" };
+    const themeSub       = darkMode ? { color: "#94a3b8" } : { color: "#6b7280" };
+
     return (
-        <SafeAreaView style={s.container}>
+        <SafeAreaView style={[s.container, themeContainer]}>
 
             {/* ── HEADER ── */}
-            <View style={s.header}>
+            <View style={[s.header, themeHeader]}>
                 <View>
-                    <Text style={s.headerTitle}>Admin Panel</Text>
+                    <Text style={[s.headerTitle, darkMode && { color: "#4ade80" }]}>Admin Panel</Text>
                 </View>
                 <TouchableOpacity onPress={handleLogout} style={s.logoutBtn} activeOpacity={0.7}>
                     <LogOut color="#ef4444" size={20} />
@@ -717,44 +736,44 @@ export default function AdminDashboard() {
                 <View style={s.statsGrid}>
                     {/* Total Drivers — tappable */}
                     <TouchableOpacity
-                        style={[s.statCard, { backgroundColor: "#f0fdf4" }]}
+                        style={[s.statCard, darkMode ? { backgroundColor: "#064e3b" } : { backgroundColor: "#f0fdf4" }]}
                         onPress={() => setDriversModalOpen(true)}
                         activeOpacity={0.75}
                     >
-                        <Users color="#15803d" size={22} />
-                        <Text style={s.statNumber}>{stats.totalDrivers}</Text>
-                        <Text style={s.statLabel}>Total Drivers</Text>
-                        <Text style={s.statTapHint}>Tap to view ›</Text>
+                        <Users color={darkMode ? "#4ade80" : "#15803d"} size={22} />
+                        <Text style={[s.statNumber, darkMode && { color: "#4ade80" }]}>{stats.totalDrivers}</Text>
+                        <Text style={[s.statLabel, darkMode && { color: "#94a3b8" }]}>Total Drivers</Text>
+                        <Text style={[s.statTapHint, darkMode && { color: "#4ade80" }]}>Tap to view ›</Text>
                     </TouchableOpacity>
 
-                    <View style={[s.statCard, { backgroundColor: "#eff6ff" }]}>
+                    <View style={[s.statCard, darkMode ? { backgroundColor: "#1e3a8a" } : { backgroundColor: "#eff6ff" }]}>
                         <Bus color="#2563eb" size={22} />
                         <Text style={[s.statNumber, { color: "#2563eb" }]}>{stats.totalJeeps}</Text>
-                        <Text style={s.statLabel}>Total Jeeps</Text>
+                        <Text style={[s.statLabel, darkMode && { color: "#94a3b8" }]}>Total Jeeps</Text>
                     </View>
-                    <View style={[s.statCard, { backgroundColor: "#f0fdf4" }]}>
+                    <View style={[s.statCard, darkMode ? { backgroundColor: "#064e3b" } : { backgroundColor: "#f0fdf4" }]}>
                         <CheckCircle color="#15803d" size={22} />
-                        <Text style={s.statNumber}>{stats.activeJeeps}</Text>
-                        <Text style={s.statLabel}>Active</Text>
+                        <Text style={[s.statNumber, darkMode && { color: "#4ade80" }]}>{stats.activeJeeps}</Text>
+                        <Text style={[s.statLabel, darkMode && { color: "#94a3b8" }]}>Active</Text>
                     </View>
-                    <View style={[s.statCard, { backgroundColor: "#fef2f2" }]}>
+                    <View style={[s.statCard, darkMode ? { backgroundColor: "#7f1d1d" } : { backgroundColor: "#fef2f2" }]}>
                         <XCircle color="#ef4444" size={22} />
                         <Text style={[s.statNumber, { color: "#ef4444" }]}>{stats.inactiveJeeps}</Text>
-                        <Text style={s.statLabel}>Inactive</Text>
+                        <Text style={[s.statLabel, darkMode && { color: "#94a3b8" }]}>Inactive</Text>
                     </View>
                 </View>
 
                 {/* ── QUICK ACTIONS ── */}
                 <View style={s.actionSection}>
-                    <Text style={s.actionSectionTitle}>Quick Actions</Text>
-                    <TouchableOpacity onPress={() => setPendingModalOpen(true)} style={s.pendingCard} activeOpacity={0.8}>
+                    <Text style={[s.actionSectionTitle, themeText]}>Quick Actions</Text>
+                    <TouchableOpacity onPress={() => setPendingModalOpen(true)} style={[s.pendingCard, darkMode && { backgroundColor: "#1e293b", borderColor: "#451a03" }]} activeOpacity={0.8}>
                         <View style={s.cardLeft}>
                             <View style={[s.cardIconBox, { backgroundColor: "#fef3c7" }]}>
                                 <FileText color="#d97706" size={22} />
                             </View>
                             <View>
-                                <Text style={s.cardTitle}>Driver Applications</Text>
-                                <Text style={s.cardSub}>Review submitted documents</Text>
+                                <Text style={[s.cardTitle, themeText]}>Driver Applications</Text>
+                                <Text style={[s.cardSub, themeSub]}>Review submitted documents</Text>
                             </View>
                         </View>
                         <View style={s.cardRight}>
@@ -765,38 +784,53 @@ export default function AdminDashboard() {
                             <ChevronRight color="#d97706" size={18} style={{ marginTop: 4 }} />
                         </View>
                     </TouchableOpacity>
+
+                    <TouchableOpacity onPress={handleClearMap} style={[s.pendingCard, darkMode ? { backgroundColor: "#1e293b", borderColor: "#7f1d1d" } : { borderColor: "#fecaca" }]} activeOpacity={0.8}>
+                        <View style={s.cardLeft}>
+                            <View style={[s.cardIconBox, { backgroundColor: "#fee2e2" }]}>
+                                <Trash2 color="#ef4444" size={22} />
+                            </View>
+                            <View>
+                                <Text style={[s.cardTitle, themeText]}>Clear Live Map</Text>
+                                <Text style={[s.cardSub, themeSub]}>Remove all active ride requests</Text>
+                            </View>
+                        </View>
+                        <View style={s.cardRight}>
+                            <ChevronRight color="#ef4444" size={18} />
+                        </View>
+                    </TouchableOpacity>
                 </View>
 
                 {/* ── LIVE JEEP STATUS ── */}
                 <View style={s.section}>
                     <View style={s.sectionHeader}>
                         <TrendingUp color="#15803d" size={18} />
-                        <Text style={s.sectionTitle}>Live Jeep Status</Text>
+                        <Text style={[s.sectionTitle, themeText]}>Live Jeep Status</Text>
                     </View>
-                    <Text style={s.sectionHint}>Tap a jeep to view its revenue</Text>
+                    <Text style={[s.sectionHint, themeSub]}>Tap a jeep to view its revenue</Text>
 
                     {jeeps.length === 0 ? (
-                        <Text style={s.emptyText}>No jeeps found.</Text>
+                        <Text style={[s.emptyText, themeSub]}>No jeeps found.</Text>
                     ) : jeeps.map(jeep => {
                         const info     = jeepInfo[jeep.uid];
                         const isActive = jeep.status === "available";
                         return (
                             <TouchableOpacity
                                 key={jeep.uid}
-                                style={s.jeepCard}
+                                style={[s.jeepCard, themeCard]}
                                 onPress={() => setSelectedJeep(jeep)}
                                 activeOpacity={0.75}
                             >
                                 <View style={[s.statusDot, { backgroundColor: isActive ? "#15803d" : "#9ca3af" }]} />
                                 <View style={s.jeepInfoBlock}>
-                                    <Text style={s.jeepName}>{info?.driverName ?? "Unknown Driver"}</Text>
-                                    <Text style={s.jeepPlate}>{info?.plate ?? "No plate"} · {info?.route ?? "No route"}</Text>
-                                    <Text style={s.jeepCoords}>
+                                    <Text style={[s.jeepName, themeText]}>{info?.driverName ?? "Unknown Driver"}</Text>
+                                    <Text style={[s.jeepPlate, themeSub]}>{info?.plate ?? "No plate"} · {info?.route ?? "No route"}</Text>
+                                    <Text style={[s.jeepCoords, themeSub]}>
                                         {jeep.latitude?.toFixed(5)}, {jeep.longitude?.toFixed(5)}
                                     </Text>
                                 </View>
                                 <View style={{ alignItems: "flex-end", gap: 6 }}>
-                                    <View style={[s.statusBadge, { backgroundColor: isActive ? "#dcfce7" : "#f3f4f6" }]}>
+                                    <View style={[s.statusBadge, isActive ? { backgroundColor: "#dcfce7" } : (darkMode ? { backgroundColor: "#334155" } : { backgroundColor: "#f3f4f6" })]}>
                                         <Text style={[s.statusText, { color: isActive ? "#15803d" : "#6b7280" }]}>
                                             {isActive ? "Active" : "Inactive"}
                                         </Text>
