@@ -3,16 +3,18 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
     View, Text, ScrollView, TouchableOpacity,
     StyleSheet, ActivityIndicator, RefreshControl,
-    Modal, Dimensions, Alert,
+    Modal, Dimensions, Alert, TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import {
     Bus, Users, CheckCircle, XCircle, LogOut, TrendingUp,
     X, ChevronRight, Clock, FileText, DollarSign,
-    Navigation, BarChart2, MapPin, Calendar, Trash2
+    Navigation, BarChart2, MapPin, Calendar, Trash2,
+    Building2, Plus, Phone,
 } from "lucide-react-native";
 import { auth, db, ref, onValue, get, signOut, remove } from "../../services/firebase";
+import { push } from "firebase/database";
 import { useDriverRevenue, DateFilter } from "../../hooks/useRevenue";
 import { useTheme } from "../ThemeContext";
 
@@ -35,6 +37,10 @@ interface Driver {
 interface Trip {
     id: string; destination: string; startTime: number;
     endTime: number | null; date: string;
+}
+interface Operator {
+    id: string; name: string; contactNumber?: string;
+    address?: string; status: string; createdAt: number;
 }
 type TripView  = "today" | "week";
 type DriverTab = "trips" | "revenue";
@@ -62,6 +68,150 @@ const REV_TABS: { k: DateFilter; l: string }[] = [
     { k: "today", l: "Today" }, { k: "week", l: "Week" },
     { k: "month", l: "Month" }, { k: "all",  l: "All"  },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPERATOR QUICK-ADD MODAL
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface OperatorQuickAddProps {
+    visible: boolean;
+    onClose: () => void;
+    operators: Operator[];
+}
+
+function OperatorQuickAddModal({ visible, onClose, operators }: OperatorQuickAddProps) {
+    const [name, setName]       = useState("");
+    const [contact, setContact] = useState("");
+    const [address, setAddress] = useState("");
+    const [saving, setSaving]   = useState(false);
+
+    const handleSave = async () => {
+        if (!name.trim()) { Alert.alert("Required", "Operator name is required."); return; }
+        setSaving(true);
+        try {
+            await push(ref(db, "operators"), {
+                name: name.trim(),
+                contactNumber: contact.trim(),
+                address: address.trim(),
+                status: "active",
+                createdAt: Date.now(),
+            });
+            Alert.alert("✅ Added", `${name.trim()} has been registered as an operator.`);
+            setName(""); setContact(""); setAddress("");
+            onClose();
+        } catch {
+            Alert.alert("Error", "Failed to save. Check your connection.");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <Modal visible={visible} transparent animationType="slide">
+            <View style={s.overlay}>
+                <View style={[s.sheet, { maxHeight: SCREEN_H * 0.88 }]}>
+                    <View style={s.handle} />
+
+                    {/* Header */}
+                    <View style={s.mHeader}>
+                        <View style={[s.mAvatar, { backgroundColor: "#f0fdf4" }]}>
+                            <Building2 color="#15803d" size={22} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                            <Text style={s.mName}>Manage Operators</Text>
+                            <Text style={s.mEmail}>{operators.length} registered</Text>
+                        </View>
+                        <TouchableOpacity onPress={onClose} style={s.closeBtn}>
+                            <X color="#6b7280" size={20} />
+                        </TouchableOpacity>
+                    </View>
+
+                    <ScrollView showsVerticalScrollIndicator={false}>
+                        {/* Existing operators list */}
+                        {operators.length > 0 && (
+                            <>
+                                <Text style={op.sectionTitle}>Registered Operators</Text>
+                                {operators.map(o => (
+                                    <View key={o.id} style={op.row}>
+                                        <View style={[op.dot, { backgroundColor: o.status === "active" ? "#15803d" : "#9ca3af" }]} />
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={op.rowName}>{o.name}</Text>
+                                            {!!o.contactNumber && (
+                                                <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 }}>
+                                                    <Phone size={10} color="#9ca3af" />
+                                                    <Text style={op.rowSub}>{o.contactNumber}</Text>
+                                                </View>
+                                            )}
+                                            {!!o.address && (
+                                                <Text style={op.rowSub} numberOfLines={1}>{o.address}</Text>
+                                            )}
+                                        </View>
+                                        <View style={[op.badge, { backgroundColor: o.status === "active" ? "#dcfce7" : "#f3f4f6" }]}>
+                                            <Text style={[op.badgeTxt, { color: o.status === "active" ? "#15803d" : "#6b7280" }]}>
+                                                {o.status === "active" ? "Active" : "Inactive"}
+                                            </Text>
+                                        </View>
+                                    </View>
+                                ))}
+                                <View style={op.divider} />
+                            </>
+                        )}
+
+                        {/* Add new operator form */}
+                        <Text style={op.sectionTitle}>Add New Operator</Text>
+
+                        {[
+                            { label: "Operator / Franchise Name *", value: name, setter: setName, placeholder: "e.g. Juan Dela Cruz Transport", cap: "words" as any },
+                            { label: "Contact Number", value: contact, setter: setContact, placeholder: "e.g. 0912-345-6789", kb: "phone-pad" as any, cap: "none" as any },
+                            { label: "Address", value: address, setter: setAddress, placeholder: "e.g. Balacbac, Baguio City", cap: "sentences" as any },
+                        ].map((f, i) => (
+                            <View key={i} style={{ marginBottom: 14 }}>
+                                <Text style={op.fieldLbl}>{f.label}</Text>
+                                <TextInput
+                                    value={f.value}
+                                    onChangeText={f.setter}
+                                    placeholder={f.placeholder}
+                                    placeholderTextColor="#d1d5db"
+                                    keyboardType={f.kb ?? "default"}
+                                    autoCapitalize={f.cap}
+                                    style={op.fieldInput}
+                                />
+                            </View>
+                        ))}
+
+                        <TouchableOpacity
+                            style={[op.saveBtn, saving && { opacity: 0.6 }]}
+                            onPress={handleSave}
+                            disabled={saving}
+                            activeOpacity={0.85}
+                        >
+                            {saving
+                                ? <ActivityIndicator color="white" />
+                                : <><Plus color="white" size={18} /><Text style={op.saveTxt}>Add Operator</Text></>
+                            }
+                        </TouchableOpacity>
+                        <View style={{ height: 20 }} />
+                    </ScrollView>
+                </View>
+            </View>
+        </Modal>
+    );
+}
+
+const op = StyleSheet.create({
+    sectionTitle:{ fontSize: 12, fontWeight: "800", color: "#9ca3af", textTransform: "uppercase", marginBottom: 10 },
+    row:         { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#f3f4f6" },
+    dot:         { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
+    rowName:     { fontSize: 14, fontWeight: "700", color: "#111827" },
+    rowSub:      { fontSize: 11, color: "#9ca3af" },
+    badge:       { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+    badgeTxt:    { fontSize: 10, fontWeight: "700" },
+    divider:     { height: 1, backgroundColor: "#e5e7eb", marginVertical: 18 },
+    fieldLbl:    { fontSize: 11, fontWeight: "700", color: "#9ca3af", textTransform: "uppercase", marginBottom: 6 },
+    fieldInput:  { backgroundColor: "#f9fafb", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: "#111827", borderWidth: 1, borderColor: "#e5e7eb" },
+    saveBtn:     { backgroundColor: "#15803d", borderRadius: 14, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+    saveTxt:     { color: "white", fontWeight: "800", fontSize: 15 },
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REVENUE PANEL
@@ -145,13 +295,11 @@ const rp = StyleSheet.create({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DRIVER DETAIL SHEET  ← rendered at the ROOT level, never inside another modal
+// DRIVER DETAIL SHEET
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface DriverDetailProps {
-    visible: boolean;
-    driver: Driver | null;
-    onClose: () => void;
+    visible: boolean; driver: Driver | null; onClose: () => void;
 }
 
 function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
@@ -162,22 +310,14 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
 
     useEffect(() => {
         if (!visible || !driver) return;
-        setMainTab("trips");
-        setTripView("today");
-        setTripsLoading(true);
-        setTrips([]);
+        setMainTab("trips"); setTripView("today");
+        setTripsLoading(true); setTrips([]);
         get(ref(db, `driver_trips/${driver.uid}`))
             .then(snap => {
                 if (snap.exists()) {
                     const data = snap.val() as Record<string, Omit<Trip, "id">>;
-                    setTrips(
-                        Object.entries(data)
-                            .map(([id, v]) => ({ id, ...v }))
-                            .sort((a, b) => b.startTime - a.startTime)
-                    );
-                } else {
-                    setTrips([]);
-                }
+                    setTrips(Object.entries(data).map(([id, v]) => ({ id, ...v })).sort((a, b) => b.startTime - a.startTime));
+                } else { setTrips([]); }
             })
             .catch(() => setTrips([]))
             .finally(() => setTripsLoading(false));
@@ -208,9 +348,7 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
                                     <Text style={s.mName}>{driver.username}</Text>
                                     <Text style={s.mEmail}>{driver.email}</Text>
                                 </View>
-                                <TouchableOpacity onPress={onClose} style={s.closeBtn}>
-                                    <X color="#6b7280" size={20} />
-                                </TouchableOpacity>
+                                <TouchableOpacity onPress={onClose} style={s.closeBtn}><X color="#6b7280" size={20} /></TouchableOpacity>
                             </View>
 
                             <View style={s.quickStats}>
@@ -237,17 +375,11 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
                             </View>
 
                             <View style={s.mainTabRow}>
-                                <TouchableOpacity
-                                    style={[s.mainTab, mainTab === "trips" && s.mainTabActive]}
-                                    onPress={() => setMainTab("trips")}
-                                >
+                                <TouchableOpacity style={[s.mainTab, mainTab === "trips" && s.mainTabActive]} onPress={() => setMainTab("trips")}>
                                     <Navigation size={14} color={mainTab === "trips" ? "white" : "#6b7280"} />
                                     <Text style={[s.mainTabTxt, mainTab === "trips" && s.mainTabTxtA]}>Trip Log</Text>
                                 </TouchableOpacity>
-                                <TouchableOpacity
-                                    style={[s.mainTab, mainTab === "revenue" && s.mainTabActive]}
-                                    onPress={() => setMainTab("revenue")}
-                                >
+                                <TouchableOpacity style={[s.mainTab, mainTab === "revenue" && s.mainTabActive]} onPress={() => setMainTab("revenue")}>
                                     <DollarSign size={14} color={mainTab === "revenue" ? "white" : "#6b7280"} />
                                     <Text style={[s.mainTabTxt, mainTab === "revenue" && s.mainTabTxtA]}>Revenue</Text>
                                 </TouchableOpacity>
@@ -257,23 +389,12 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
                                 <>
                                     <View style={s.toggleRow}>
                                         {(["today", "week"] as TripView[]).map(v => (
-                                            <TouchableOpacity
-                                                key={v}
-                                                style={[s.toggleBtn, tripView === v && s.toggleActive]}
-                                                onPress={() => setTripView(v)}
-                                            >
-                                                {v === "today"
-                                                    ? <Calendar size={13} color={tripView === v ? "#fff" : "#6b7280"} />
-                                                    : <BarChart2 size={13} color={tripView === v ? "#fff" : "#6b7280"} />
-                                                }
-                                                <Text style={[s.toggleTxt, tripView === v && s.toggleTxtA]}>
-                                                    {v === "today" ? "Today" : "This Week"}
-                                                </Text>
+                                            <TouchableOpacity key={v} style={[s.toggleBtn, tripView === v && s.toggleActive]} onPress={() => setTripView(v)}>
+                                                {v === "today" ? <Calendar size={13} color={tripView === v ? "#fff" : "#6b7280"} /> : <BarChart2 size={13} color={tripView === v ? "#fff" : "#6b7280"} />}
+                                                <Text style={[s.toggleTxt, tripView === v && s.toggleTxtA]}>{v === "today" ? "Today" : "This Week"}</Text>
                                                 {(v === "today" ? todayTrips : weekTrips).length > 0 && (
                                                     <View style={[s.toggleBadge, { backgroundColor: tripView === v ? "rgba(255,255,255,.3)" : "#e5e7eb" }]}>
-                                                        <Text style={{ fontSize: 10, fontWeight: "800", color: tripView === v ? "#fff" : "#374151" }}>
-                                                            {(v === "today" ? todayTrips : weekTrips).length}
-                                                        </Text>
+                                                        <Text style={{ fontSize: 10, fontWeight: "800", color: tripView === v ? "#fff" : "#374151" }}>{(v === "today" ? todayTrips : weekTrips).length}</Text>
                                                     </View>
                                                 )}
                                             </TouchableOpacity>
@@ -286,9 +407,6 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
                                             <View style={s.centerBox}>
                                                 <Text style={{ fontSize: 36 }}>🚌</Text>
                                                 <Text style={s.centerTxt}>No trips {tripView === "today" ? "today" : "this week"}.</Text>
-                                                <Text style={{ fontSize: 12, color: "#9ca3af", textAlign: "center", marginTop: 4 }}>
-                                                    Trips are recorded when a driver starts and ends a route.
-                                                </Text>
                                             </View>
                                         ) : displayTrips.map((trip, i) => (
                                             <View key={trip.id} style={s.tripCard}>
@@ -303,26 +421,18 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
                                                                 <MapPin color="#15803d" size={12} />
                                                                 <Text style={s.tripDest}>To {trip.destination}</Text>
                                                             </View>
-                                                            <Text style={s.tripDate}>
-                                                                {new Date(trip.startTime).toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric" })}
-                                                            </Text>
+                                                            <Text style={s.tripDate}>{new Date(trip.startTime).toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric" })}</Text>
                                                         </View>
                                                         <View style={[s.tripBadge, { backgroundColor: trip.endTime ? "#dcfce7" : "#fef3c7" }]}>
-                                                            <Text style={[s.tripBadgeTxt, { color: trip.endTime ? "#15803d" : "#d97706" }]}>
-                                                                {trip.endTime ? "✓ Done" : "● Active"}
-                                                            </Text>
+                                                            <Text style={[s.tripBadgeTxt, { color: trip.endTime ? "#15803d" : "#d97706" }]}>{trip.endTime ? "✓ Done" : "● Active"}</Text>
                                                         </View>
                                                     </View>
                                                     <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
                                                         <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                                                             <Clock size={11} color="#9ca3af" />
-                                                            <Text style={{ fontSize: 11, color: "#6b7280" }}>
-                                                                {fmt(trip.startTime)}{trip.endTime ? ` – ${fmt(trip.endTime)}` : " (ongoing)"}
-                                                            </Text>
+                                                            <Text style={{ fontSize: 11, color: "#6b7280" }}>{fmt(trip.startTime)}{trip.endTime ? ` – ${fmt(trip.endTime)}` : " (ongoing)"}</Text>
                                                         </View>
-                                                        <Text style={{ fontSize: 11, color: "#9ca3af", fontWeight: "600" }}>
-                                                            {dur(trip.startTime, trip.endTime)}
-                                                        </Text>
+                                                        <Text style={{ fontSize: 11, color: "#9ca3af", fontWeight: "600" }}>{dur(trip.startTime, trip.endTime)}</Text>
                                                     </View>
                                                 </View>
                                             </View>
@@ -330,7 +440,6 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
                                     </ScrollView>
                                 </>
                             )}
-
                             {mainTab === "revenue" && (
                                 <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
                                     <RevenuePanel driverId={driver.uid} />
@@ -345,16 +454,12 @@ function DriverDetailSheet({ visible, driver, onClose }: DriverDetailProps) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DRIVERS LIST MODAL  ← only shows the list, no nested modal inside
+// DRIVERS LIST MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface DriversModalProps {
-    visible: boolean;
-    onClose: () => void;
-    onSelectDriver: (driver: Driver) => void;   // ← lifts selection up to parent
-}
-
-function DriversModal({ visible, onClose, onSelectDriver }: DriversModalProps) {
+function DriversModal({ visible, onClose, onSelectDriver }: {
+    visible: boolean; onClose: () => void; onSelectDriver: (d: Driver) => void;
+}) {
     const [drivers, setDrivers] = useState<Driver[]>([]);
     const [loading, setLoading] = useState(true);
 
@@ -363,14 +468,8 @@ function DriversModal({ visible, onClose, onSelectDriver }: DriversModalProps) {
         setLoading(true);
         const unsub = onValue(ref(db, "users"), snap => {
             if (snap.exists()) {
-                setDrivers(
-                    Object.entries(snap.val())
-                        .filter(([_, v]: any) => v.role === "driver")
-                        .map(([uid, v]: any) => ({ uid, ...v }))
-                );
-            } else {
-                setDrivers([]);
-            }
+                setDrivers(Object.entries(snap.val()).filter(([_, v]: any) => v.role === "driver").map(([uid, v]: any) => ({ uid, ...v })));
+            } else { setDrivers([]); }
             setLoading(false);
         });
         return () => unsub();
@@ -382,38 +481,22 @@ function DriversModal({ visible, onClose, onSelectDriver }: DriversModalProps) {
                 <View style={[s.sheet, { height: SCREEN_H * 0.85 }]}>
                     <View style={s.handle} />
                     <View style={s.mHeader}>
-                        <View style={[s.mAvatar, { backgroundColor: "#eff6ff" }]}>
-                            <Users color="#2563eb" size={22} />
-                        </View>
+                        <View style={[s.mAvatar, { backgroundColor: "#eff6ff" }]}><Users color="#2563eb" size={22} /></View>
                         <View style={{ flex: 1 }}>
                             <Text style={s.mName}>All Drivers</Text>
                             <Text style={s.mEmail}>{drivers.length} registered</Text>
                         </View>
-                        <TouchableOpacity onPress={onClose} style={s.closeBtn}>
-                            <X color="#6b7280" size={20} />
-                        </TouchableOpacity>
+                        <TouchableOpacity onPress={onClose} style={s.closeBtn}><X color="#6b7280" size={20} /></TouchableOpacity>
                     </View>
-
-                    {loading ? (
-                        <ActivityIndicator color="#15803d" style={{ marginTop: 32 }} />
-                    ) : drivers.length === 0 ? (
-                        <View style={s.centerBox}>
-                            <Text style={{ fontSize: 36 }}>👤</Text>
-                            <Text style={s.centerTxt}>No drivers registered yet.</Text>
-                        </View>
+                    {loading ? <ActivityIndicator color="#15803d" style={{ marginTop: 32 }} />
+                    : drivers.length === 0 ? (
+                        <View style={s.centerBox}><Text style={{ fontSize: 36 }}>👤</Text><Text style={s.centerTxt}>No drivers registered yet.</Text></View>
                     ) : (
                         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingBottom: 20 }}>
                             <Text style={s.listHint}>Tap a driver to view their trips and revenue</Text>
                             {drivers.map(d => (
-                                <TouchableOpacity
-                                    key={d.uid}
-                                    style={s.driverCard}
-                                    onPress={() => onSelectDriver(d)}   // ← no nested modal
-                                    activeOpacity={0.75}
-                                >
-                                    <View style={s.driverAvatar}>
-                                        <Text style={s.driverAvatarTxt}>{d.username?.charAt(0)?.toUpperCase() ?? "D"}</Text>
-                                    </View>
+                                <TouchableOpacity key={d.uid} style={s.driverCard} onPress={() => onSelectDriver(d)} activeOpacity={0.75}>
+                                    <View style={s.driverAvatar}><Text style={s.driverAvatarTxt}>{d.username?.charAt(0)?.toUpperCase() ?? "D"}</Text></View>
                                     <View style={{ flex: 1 }}>
                                         <Text style={s.driverName}>{d.username ?? "Unknown"}</Text>
                                         <Text style={s.driverEmail}>{d.email ?? "No email"}</Text>
@@ -436,12 +519,10 @@ function DriversModal({ visible, onClose, onSelectDriver }: DriversModalProps) {
 // JEEP REVENUE MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface JeepRevenueModalProps {
-    visible: boolean; onClose: () => void;
-    driverId: string; driverName: string; plate: string; route: string;
-}
-
-function JeepRevenueModal({ visible, onClose, driverId, driverName, plate, route }: JeepRevenueModalProps) {
+function JeepRevenueModal({ visible, onClose, driverId, driverName, plate, route }: {
+    visible: boolean; onClose: () => void; driverId: string;
+    driverName: string; plate: string; route: string;
+}) {
     const [filter, setFilter] = useState<DateFilter>("today");
     const { entries, stats, loading } = useDriverRevenue(driverId, filter);
 
@@ -451,18 +532,10 @@ function JeepRevenueModal({ visible, onClose, driverId, driverName, plate, route
                 <View style={[s.sheet, { height: SCREEN_H * 0.88 }]}>
                     <View style={s.handle} />
                     <View style={s.mHeader}>
-                        <View style={[s.mAvatar, { backgroundColor: "#f0fdf4" }]}>
-                            <Bus color="#15803d" size={22} />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                            <Text style={s.mName}>{driverName}</Text>
-                            <Text style={s.mEmail}>{plate} · {route}</Text>
-                        </View>
-                        <TouchableOpacity onPress={onClose} style={s.closeBtn}>
-                            <X color="#6b7280" size={20} />
-                        </TouchableOpacity>
+                        <View style={[s.mAvatar, { backgroundColor: "#f0fdf4" }]}><Bus color="#15803d" size={22} /></View>
+                        <View style={{ flex: 1 }}><Text style={s.mName}>{driverName}</Text><Text style={s.mEmail}>{plate} · {route}</Text></View>
+                        <TouchableOpacity onPress={onClose} style={s.closeBtn}><X color="#6b7280" size={20} /></TouchableOpacity>
                     </View>
-
                     <View style={rp.tabs}>
                         {REV_TABS.map(t => (
                             <TouchableOpacity key={t.k} onPress={() => setFilter(t.k)} style={[rp.tab, filter === t.k && rp.tabA]}>
@@ -470,47 +543,24 @@ function JeepRevenueModal({ visible, onClose, driverId, driverName, plate, route
                             </TouchableOpacity>
                         ))}
                     </View>
-
                     {loading ? <ActivityIndicator color="#15803d" style={{ marginTop: 24 }} /> : (
                         <>
                             <View style={rp.statsRow}>
-                                <View style={[rp.stat, { backgroundColor: "#f0fdf4" }]}>
-                                    <Text style={rp.statAmt}>₱{stats.total.toLocaleString()}</Text>
-                                    <Text style={rp.statLbl}>Revenue</Text>
-                                </View>
-                                <View style={[rp.stat, { backgroundColor: "#eff6ff" }]}>
-                                    <Text style={[rp.statAmt, { color: "#2563eb" }]}>{stats.tripCount}</Text>
-                                    <Text style={rp.statLbl}>Trips</Text>
-                                </View>
-                                <View style={[rp.stat, { backgroundColor: "#fefce8" }]}>
-                                    <Text style={[rp.statAmt, { color: "#d97706" }]}>{stats.totalPassengers}</Text>
-                                    <Text style={rp.statLbl}>Passengers</Text>
-                                </View>
-                                <View style={[rp.stat, { backgroundColor: "#f0fdf4" }]}>
-                                    <Text style={rp.statAmt}>₱{stats.avgPerTrip}</Text>
-                                    <Text style={rp.statLbl}>Avg/Trip</Text>
-                                </View>
+                                <View style={[rp.stat, { backgroundColor: "#f0fdf4" }]}><Text style={rp.statAmt}>₱{stats.total.toLocaleString()}</Text><Text style={rp.statLbl}>Revenue</Text></View>
+                                <View style={[rp.stat, { backgroundColor: "#eff6ff" }]}><Text style={[rp.statAmt, { color: "#2563eb" }]}>{stats.tripCount}</Text><Text style={rp.statLbl}>Trips</Text></View>
+                                <View style={[rp.stat, { backgroundColor: "#fefce8" }]}><Text style={[rp.statAmt, { color: "#d97706" }]}>{stats.totalPassengers}</Text><Text style={rp.statLbl}>Passengers</Text></View>
+                                <View style={[rp.stat, { backgroundColor: "#f0fdf4" }]}><Text style={rp.statAmt}>₱{stats.avgPerTrip}</Text><Text style={rp.statLbl}>Avg/Trip</Text></View>
                             </View>
                             <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
                                 {entries.length === 0 ? (
-                                    <View style={s.centerBox}>
-                                        <Text style={{ fontSize: 36 }}>💰</Text>
-                                        <Text style={s.centerTxt}>No revenue recorded for this period.</Text>
-                                    </View>
+                                    <View style={s.centerBox}><Text style={{ fontSize: 36 }}>💰</Text><Text style={s.centerTxt}>No revenue for this period.</Text></View>
                                 ) : entries.map(e => (
                                     <View key={e.id} style={rp.row}>
                                         <View style={rp.rowDot} />
                                         <View style={{ flex: 1 }}>
                                             <Text style={rp.rowRoute}>{e.route}</Text>
-                                            <Text style={rp.rowMeta}>
-                                                {e.passengerCount} pax ·{" "}
-                                                {new Date(e.timestamp).toLocaleDateString("en-PH", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                                            </Text>
-                                            {e.groups && e.groups.length > 0 && (
-                                                <Text style={rp.rowGroups}>
-                                                    {e.groups.map((g: any) => `${g.passengerCount}×₱${g.farePerPassenger}`).join("  +  ")}
-                                                </Text>
-                                            )}
+                                            <Text style={rp.rowMeta}>{e.passengerCount} pax · {new Date(e.timestamp).toLocaleDateString("en-PH", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</Text>
+                                            {e.groups && e.groups.length > 0 && <Text style={rp.rowGroups}>{e.groups.map((g: any) => `${g.passengerCount}×₱${g.farePerPassenger}`).join("  +  ")}</Text>}
                                         </View>
                                         <Text style={rp.rowAmt}>₱{e.amount}</Text>
                                     </View>
@@ -528,11 +578,10 @@ function JeepRevenueModal({ visible, onClose, driverId, driverName, plate, route
 // PENDING REGISTRATIONS MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface PendingModalProps {
-    visible: boolean; onClose: () => void; onNavigateToRegistrations: () => void;
-}
 
-function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations }: PendingModalProps) {
+function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations }: {
+    visible: boolean; onClose: () => void; onNavigateToRegistrations: () => void;
+}) {
     const [pendingList, setPendingList] = useState<PendingRegistration[]>([]);
     const [loadingList, setLoadingList] = useState(false);
 
@@ -557,24 +606,13 @@ function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations
                 <View style={[s.sheet, { height: SCREEN_H * 0.75 }]}>
                     <View style={s.handle} />
                     <View style={s.mHeader}>
-                        <View style={[s.mAvatar, { backgroundColor: "#fef3c7" }]}>
-                            <FileText color="#d97706" size={22} />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                            <Text style={s.mName}>Pending Applications</Text>
-                            <Text style={s.mEmail}>{pendingList.length} awaiting review</Text>
-                        </View>
-                        <TouchableOpacity onPress={onClose} style={s.closeBtn}>
-                            <X color="#6b7280" size={20} />
-                        </TouchableOpacity>
+                        <View style={[s.mAvatar, { backgroundColor: "#fef3c7" }]}><FileText color="#d97706" size={22} /></View>
+                        <View style={{ flex: 1 }}><Text style={s.mName}>Pending Applications</Text><Text style={s.mEmail}>{pendingList.length} awaiting review</Text></View>
+                        <TouchableOpacity onPress={onClose} style={s.closeBtn}><X color="#6b7280" size={20} /></TouchableOpacity>
                     </View>
-
                     {loadingList ? <ActivityIndicator color="#15803d" style={{ marginTop: 32 }} />
                     : pendingList.length === 0 ? (
-                        <View style={s.centerBox}>
-                            <Text style={{ fontSize: 36 }}>✅</Text>
-                            <Text style={s.centerTxt}>No pending applications.</Text>
-                        </View>
+                        <View style={s.centerBox}><Text style={{ fontSize: 36 }}>✅</Text><Text style={s.centerTxt}>No pending applications.</Text></View>
                     ) : (
                         <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
                             {pendingList.map(reg => (
@@ -597,12 +635,7 @@ function PendingRegistrationsModal({ visible, onClose, onNavigateToRegistrations
                             ))}
                         </ScrollView>
                     )}
-
-                    <TouchableOpacity
-                        style={s.reviewAllBtn}
-                        onPress={() => { onClose(); onNavigateToRegistrations(); }}
-                        activeOpacity={0.8}
-                    >
+                    <TouchableOpacity style={s.reviewAllBtn} onPress={() => { onClose(); onNavigateToRegistrations(); }} activeOpacity={0.8}>
                         <Text style={s.reviewAllTxt}>Review All Applications</Text>
                         <ChevronRight color="white" size={18} />
                     </TouchableOpacity>
@@ -627,77 +660,85 @@ export default function AdminDashboard() {
     const [jeepInfo, setJeepInfo]         = useState<Record<string, any>>({});
     const [pendingCount, setPendingCount] = useState(0);
 
-    // Modal state — all at root level so modals never nest
-    const [driversModalOpen,  setDriversModalOpen]  = useState(false);
-    const [selectedDriver,    setSelectedDriver]    = useState<Driver | null>(null);
-    const [selectedJeep,      setSelectedJeep]      = useState<JeepItem | null>(null);
-    const [pendingModalOpen,  setPendingModalOpen]  = useState(false);
+    // Operators state
+    const [operators, setOperators]             = useState<Operator[]>([]);
+    const [operatorsModalOpen, setOperatorsModalOpen] = useState(false);
 
-    // Keep Firebase unsubscribe refs so we can clean them up properly
+    // Modal state
+    const [driversModalOpen, setDriversModalOpen]   = useState(false);
+    const [selectedDriver,   setSelectedDriver]     = useState<Driver | null>(null);
+    const [selectedJeep,     setSelectedJeep]       = useState<JeepItem | null>(null);
+    const [pendingModalOpen, setPendingModalOpen]   = useState(false);
+
     const unsubsRef = useRef<(() => void)[]>([]);
 
     const setupListeners = useCallback(() => {
-        // Clean up any existing listeners first
         unsubsRef.current.forEach(fn => fn());
         unsubsRef.current = [];
 
         const u1 = onValue(ref(db, "jeeps"), snap => {
             if (snap.exists()) {
-                const data   = snap.val();
-                const list   = Object.entries(data).map(([uid, val]: any) => ({ uid, ...val }));
+                const list = Object.entries(snap.val()).map(([uid, val]: any) => ({ uid, ...val }));
                 const active = list.filter((j: any) => j.status === "available").length;
                 setJeeps(list);
                 setStats(prev => ({ ...prev, totalJeeps: list.length, activeJeeps: active, inactiveJeeps: list.length - active }));
             }
-            setLoading(false);
-            setRefreshing(false);
+            setLoading(false); setRefreshing(false);
         });
-
-        const u2 = onValue(ref(db, "jeep_info"), snap => {
-            if (snap.exists()) setJeepInfo(snap.val());
-        });
-
+        const u2 = onValue(ref(db, "jeep_info"), snap => { if (snap.exists()) setJeepInfo(snap.val()); });
         const u3 = onValue(ref(db, "users"), snap => {
             if (snap.exists()) {
                 const count = Object.values(snap.val()).filter((u: any) => u.role === "driver").length;
                 setStats(prev => ({ ...prev, totalDrivers: count }));
             }
         });
-
         const u4 = onValue(ref(db, "pending_registrations"), snap => {
             if (!snap.exists()) { setPendingCount(0); return; }
             setPendingCount(Object.values(snap.val()).filter((r: any) => r.status === "pending").length);
         });
+        // ── Operators live count ──
+        const u5 = onValue(ref(db, "operators"), snap => {
+            setOperators(snap.exists()
+                ? Object.entries(snap.val()).map(([id, v]: any) => ({ id, ...v }))
+                : []
+            );
+        });
 
-        unsubsRef.current = [u1, u2, u3, u4];
+        unsubsRef.current = [u1, u2, u3, u4, u5];
     }, []);
 
     useEffect(() => {
         setupListeners();
-        // Clean up all listeners when the component unmounts (tab change)
         return () => { unsubsRef.current.forEach(fn => fn()); };
     }, [setupListeners]);
 
-    const handleLogout = async () => { await signOut(auth); router.replace("/login"); };
-    const onRefresh    = () => { setRefreshing(true); setupListeners(); };
-    const selectedInfo = selectedJeep ? jeepInfo[selectedJeep.uid] : null;
+    const handleLogout  = async () => { await signOut(auth); router.replace("/login"); };
+    const onRefresh     = () => { setRefreshing(true); setupListeners(); };
+    const selectedInfo  = selectedJeep ? jeepInfo[selectedJeep.uid] : null;
 
     const handleClearMap = () => {
-        Alert.alert("Clear Live Map", "This will remove all active ride requests and reset passenger markers for everyone. Continue?", [
+        Alert.alert("Clear Live Map", "Remove all active ride requests and reset passenger markers?", [
             { text: "Cancel", style: "cancel" },
             { text: "Clear Map", style: "destructive", onPress: async () => {
                 await remove(ref(db, "ride_requests"));
-                Alert.alert("Success", "Live map data has been cleared.");
+                Alert.alert("Success", "Live map data cleared.");
             }}
         ]);
     };
 
-    // When a driver is selected from the list modal: close the list, open detail
     const handleSelectDriver = (driver: Driver) => {
         setDriversModalOpen(false);
-        // Small delay so the first modal fully closes before the second opens
         setTimeout(() => setSelectedDriver(driver), 350);
     };
+
+    // Dynamic theme
+    const themeContainer = darkMode ? { backgroundColor: "#0f172a" } : { backgroundColor: "#f9fafb" };
+    const themeHeader    = darkMode ? { backgroundColor: "#1e293b", borderBottomColor: "#334155" } : { backgroundColor: "#fff" };
+    const themeText      = darkMode ? { color: "#f1f5f9" } : { color: "#111827" };
+    const themeCard      = darkMode ? { backgroundColor: "#1e293b", borderColor: "#334155" } : { backgroundColor: "#fff" };
+    const themeSub       = darkMode ? { color: "#94a3b8" } : { color: "#6b7280" };
+
+    const activeOperators   = operators.filter(o => o.status === "active").length;
 
     if (loading) {
         return (
@@ -708,17 +749,9 @@ export default function AdminDashboard() {
         );
     }
 
-    // Dynamic styles for Dark Mode
-    const themeContainer = darkMode ? { backgroundColor: "#0f172a" } : { backgroundColor: "#f9fafb" };
-    const themeHeader    = darkMode ? { backgroundColor: "#1e293b", borderBottomColor: "#334155" } : { backgroundColor: "#fff" };
-    const themeText      = darkMode ? { color: "#f1f5f9" } : { color: "#111827" };
-    const themeCard      = darkMode ? { backgroundColor: "#1e293b", borderColor: "#334155" } : { backgroundColor: "#fff" };
-    const themeSub       = darkMode ? { color: "#94a3b8" } : { color: "#6b7280" };
-
     return (
         <SafeAreaView style={[s.container, themeContainer]}>
-
-            {/* ── HEADER ── */}
+            {/* Header */}
             <View style={[s.header, themeHeader]}>
                 <View>
                     <Text style={[s.headerTitle, darkMode && { color: "#4ade80" }]}>Admin Panel</Text>
@@ -732,20 +765,14 @@ export default function AdminDashboard() {
                 showsVerticalScrollIndicator={false}
                 refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#15803d" />}
             >
-                {/* ── STAT TILES ── */}
+                {/* Stat Tiles */}
                 <View style={s.statsGrid}>
-                    {/* Total Drivers — tappable */}
-                    <TouchableOpacity
-                        style={[s.statCard, darkMode ? { backgroundColor: "#064e3b" } : { backgroundColor: "#f0fdf4" }]}
-                        onPress={() => setDriversModalOpen(true)}
-                        activeOpacity={0.75}
-                    >
+                    <TouchableOpacity style={[s.statCard, darkMode ? { backgroundColor: "#064e3b" } : { backgroundColor: "#f0fdf4" }]} onPress={() => setDriversModalOpen(true)} activeOpacity={0.75}>
                         <Users color={darkMode ? "#4ade80" : "#15803d"} size={22} />
                         <Text style={[s.statNumber, darkMode && { color: "#4ade80" }]}>{stats.totalDrivers}</Text>
                         <Text style={[s.statLabel, darkMode && { color: "#94a3b8" }]}>Total Drivers</Text>
                         <Text style={[s.statTapHint, darkMode && { color: "#4ade80" }]}>Tap to view ›</Text>
                     </TouchableOpacity>
-
                     <View style={[s.statCard, darkMode ? { backgroundColor: "#1e3a8a" } : { backgroundColor: "#eff6ff" }]}>
                         <Bus color="#2563eb" size={22} />
                         <Text style={[s.statNumber, { color: "#2563eb" }]}>{stats.totalJeeps}</Text>
@@ -763,14 +790,14 @@ export default function AdminDashboard() {
                     </View>
                 </View>
 
-                {/* ── QUICK ACTIONS ── */}
+                {/* Quick Actions */}
                 <View style={s.actionSection}>
                     <Text style={[s.actionSectionTitle, themeText]}>Quick Actions</Text>
+
+                    {/* Pending Applications */}
                     <TouchableOpacity onPress={() => setPendingModalOpen(true)} style={[s.pendingCard, darkMode && { backgroundColor: "#1e293b", borderColor: "#451a03" }]} activeOpacity={0.8}>
                         <View style={s.cardLeft}>
-                            <View style={[s.cardIconBox, { backgroundColor: "#fef3c7" }]}>
-                                <FileText color="#d97706" size={22} />
-                            </View>
+                            <View style={[s.cardIconBox, { backgroundColor: "#fef3c7" }]}><FileText color="#d97706" size={22} /></View>
                             <View>
                                 <Text style={[s.cardTitle, themeText]}>Driver Applications</Text>
                                 <Text style={[s.cardSub, themeSub]}>Review submitted documents</Text>
@@ -785,55 +812,73 @@ export default function AdminDashboard() {
                         </View>
                     </TouchableOpacity>
 
+                    {/* ── OPERATORS QUICK ACTION ── */}
+                    <TouchableOpacity
+                        onPress={() => setOperatorsModalOpen(true)}
+                        style={[s.pendingCard, darkMode
+                            ? { backgroundColor: "#1e293b", borderColor: "#14532d" }
+                            : { borderColor: "#bbf7d0", borderWidth: 1 }
+                        ]}
+                        activeOpacity={0.8}
+                    >
+                        <View style={s.cardLeft}>
+                            <View style={[s.cardIconBox, { backgroundColor: "#f0fdf4" }]}>
+                                <Building2 color="#15803d" size={22} />
+                            </View>
+                            <View>
+                                <Text style={[s.cardTitle, themeText]}>Operators</Text>
+                                <Text style={[s.cardSub, themeSub]}>
+                                    {operators.length === 0
+                                        ? "No operators registered yet"
+                                        : `${activeOperators} active · ${operators.length} total`
+                                    }
+                                </Text>
+                            </View>
+                        </View>
+                        <View style={s.cardRight}>
+                            <View style={[s.countBadge, { backgroundColor: "#f0fdf4" }]}>
+                                <Text style={[s.countBadgeText, { color: "#15803d" }]}>{operators.length}</Text>
+                            </View>
+                            <ChevronRight color="#15803d" size={18} style={{ marginTop: 4 }} />
+                        </View>
+                    </TouchableOpacity>
+
+                    {/* Clear Map */}
                     <TouchableOpacity onPress={handleClearMap} style={[s.pendingCard, darkMode ? { backgroundColor: "#1e293b", borderColor: "#7f1d1d" } : { borderColor: "#fecaca" }]} activeOpacity={0.8}>
                         <View style={s.cardLeft}>
-                            <View style={[s.cardIconBox, { backgroundColor: "#fee2e2" }]}>
-                                <Trash2 color="#ef4444" size={22} />
-                            </View>
+                            <View style={[s.cardIconBox, { backgroundColor: "#fee2e2" }]}><Trash2 color="#ef4444" size={22} /></View>
                             <View>
                                 <Text style={[s.cardTitle, themeText]}>Clear Live Map</Text>
                                 <Text style={[s.cardSub, themeSub]}>Remove all active ride requests</Text>
                             </View>
                         </View>
-                        <View style={s.cardRight}>
-                            <ChevronRight color="#ef4444" size={18} />
-                        </View>
+                        <View style={s.cardRight}><ChevronRight color="#ef4444" size={18} /></View>
                     </TouchableOpacity>
                 </View>
 
-                {/* ── LIVE JEEP STATUS ── */}
+                {/* Live Jeep Status */}
                 <View style={s.section}>
                     <View style={s.sectionHeader}>
                         <TrendingUp color="#15803d" size={18} />
                         <Text style={[s.sectionTitle, themeText]}>Live Jeep Status</Text>
                     </View>
                     <Text style={[s.sectionHint, themeSub]}>Tap a jeep to view its revenue</Text>
-
                     {jeeps.length === 0 ? (
                         <Text style={[s.emptyText, themeSub]}>No jeeps found.</Text>
                     ) : jeeps.map(jeep => {
                         const info     = jeepInfo[jeep.uid];
                         const isActive = jeep.status === "available";
                         return (
-                            <TouchableOpacity
-                                key={jeep.uid}
-                                style={[s.jeepCard, themeCard]}
-                                onPress={() => setSelectedJeep(jeep)}
-                                activeOpacity={0.75}
-                            >
+                            <TouchableOpacity key={jeep.uid} style={[s.jeepCard, themeCard]} onPress={() => setSelectedJeep(jeep)} activeOpacity={0.75}>
                                 <View style={[s.statusDot, { backgroundColor: isActive ? "#15803d" : "#9ca3af" }]} />
                                 <View style={s.jeepInfoBlock}>
                                     <Text style={[s.jeepName, themeText]}>{info?.driverName ?? "Unknown Driver"}</Text>
                                     <Text style={[s.jeepPlate, themeSub]}>{info?.plate ?? "No plate"} · {info?.route ?? "No route"}</Text>
-                                    <Text style={[s.jeepCoords, themeSub]}>
-                                        {jeep.latitude?.toFixed(5)}, {jeep.longitude?.toFixed(5)}
-                                    </Text>
+                                    <Text style={[s.jeepCoords, themeSub]}>{jeep.latitude?.toFixed(5)}, {jeep.longitude?.toFixed(5)}</Text>
                                 </View>
                                 <View style={{ alignItems: "flex-end", gap: 6 }}>
                                     <View style={[s.statusBadge, isActive ? { backgroundColor: "#dcfce7" } : (darkMode ? { backgroundColor: "#334155" } : { backgroundColor: "#f3f4f6" })]}>
-                                        <Text style={[s.statusText, { color: isActive ? "#15803d" : "#6b7280" }]}>
-                                            {isActive ? "Active" : "Inactive"}
-                                        </Text>
+                                        <Text style={[s.statusText, { color: isActive ? "#15803d" : "#6b7280" }]}>{isActive ? "Active" : "Inactive"}</Text>
                                     </View>
                                     <View style={s.revenuePill}>
                                         <DollarSign color="#15803d" size={11} />
@@ -846,7 +891,7 @@ export default function AdminDashboard() {
                 </View>
             </ScrollView>
 
-            {/* ── ALL MODALS AT ROOT — never nested ── */}
+            {/* ── MODALS (all at root level) ── */}
 
             <DriversModal
                 visible={driversModalOpen}
@@ -876,6 +921,13 @@ export default function AdminDashboard() {
                 onClose={() => setPendingModalOpen(false)}
                 onNavigateToRegistrations={() => router.push("/(admin)/registrations" as any)}
             />
+
+            {/* ── OPERATORS MODAL ── */}
+            <OperatorQuickAddModal
+                visible={operatorsModalOpen}
+                onClose={() => setOperatorsModalOpen(false)}
+                operators={operators}
+            />
         </SafeAreaView>
     );
 }
@@ -889,16 +941,15 @@ const s = StyleSheet.create({
     loadingContainer: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f9fafb" },
     loadingText:      { marginTop: 12, color: "#6b7280", fontSize: 14 },
 
-    header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#e5e7eb" },
+    header:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#e5e7eb" },
     headerTitle: { fontSize: 22, fontWeight: "900", color: "#15803d" },
-    headerSub:   { fontSize: 12, color: "#6b7280", marginTop: 2 },
     logoutBtn:   { padding: 8, backgroundColor: "#fef2f2", borderRadius: 10 },
 
-    statsGrid:  { flexDirection: "row", flexWrap: "wrap", paddingHorizontal: 16, paddingTop: 20, gap: 12 },
-    statCard:   { width: "47%", borderRadius: 16, padding: 16, alignItems: "flex-start", gap: 4 },
-    statNumber: { fontSize: 28, fontWeight: "900", color: "#15803d" },
-    statLabel:  { fontSize: 12, color: "#6b7280", fontWeight: "600" },
-    statTapHint:{ fontSize: 10, color: "#15803d", fontWeight: "700" },
+    statsGrid:   { flexDirection: "row", flexWrap: "wrap", paddingHorizontal: 16, paddingTop: 20, gap: 12 },
+    statCard:    { width: "47%", borderRadius: 16, padding: 16, alignItems: "flex-start", gap: 4 },
+    statNumber:  { fontSize: 28, fontWeight: "900", color: "#15803d" },
+    statLabel:   { fontSize: 12, color: "#6b7280", fontWeight: "600" },
+    statTapHint: { fontSize: 10, color: "#15803d", fontWeight: "700" },
 
     actionSection:      { paddingHorizontal: 16, paddingTop: 24, gap: 12 },
     actionSectionTitle: { fontSize: 16, fontWeight: "800", color: "#111827", marginBottom: 4 },
@@ -909,8 +960,8 @@ const s = StyleSheet.create({
     cardIconBox: { width: 44, height: 44, borderRadius: 14, alignItems: "center", justifyContent: "center" },
     cardTitle:   { fontSize: 15, fontWeight: "700", color: "#111827" },
     cardSub:     { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    countBadge:     { backgroundColor: "#fee2e2", borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, marginBottom: 4 },
-    countBadgeText: { color: "#dc2626", fontWeight: "800", fontSize: 13 },
+    countBadge:      { backgroundColor: "#fee2e2", borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, marginBottom: 4 },
+    countBadgeText:  { color: "#dc2626", fontWeight: "800", fontSize: 13 },
 
     section:       { marginTop: 24, paddingHorizontal: 16, paddingBottom: 32 },
     sectionHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 },
@@ -929,7 +980,6 @@ const s = StyleSheet.create({
     revenuePill:   { flexDirection: "row", alignItems: "center", gap: 3, backgroundColor: "#f0fdf4", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: "#bbf7d0" },
     revenuePillTxt:{ fontSize: 10, fontWeight: "700", color: "#15803d" },
 
-    // Shared modal / sheet
     overlay:  { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
     sheet:    { backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 32 },
     handle:   { width: 40, height: 5, backgroundColor: "#e5e7eb", borderRadius: 3, alignSelf: "center", marginBottom: 16 },
@@ -972,14 +1022,14 @@ const s = StyleSheet.create({
     tripBadge:   { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
     tripBadgeTxt:{ fontSize: 11, fontWeight: "700" },
 
-    listHint:       { fontSize: 11, color: "#9ca3af", marginBottom: 8 },
-    driverCard:     { backgroundColor: "#fff", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8, borderWidth: 1, borderColor: "#e5e7eb" },
-    driverAvatar:   { width: 44, height: 44, borderRadius: 22, backgroundColor: "#dcfce7", alignItems: "center", justifyContent: "center" },
-    driverAvatarTxt:{ fontSize: 18, fontWeight: "800", color: "#15803d" },
-    driverName:     { fontSize: 15, fontWeight: "700", color: "#111827" },
-    driverEmail:    { fontSize: 12, color: "#6b7280", marginTop: 2 },
-    driverBadge:    { backgroundColor: "#f0fdf4", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
-    driverBadgeTxt: { color: "#15803d", fontSize: 11, fontWeight: "700" },
+    listHint:        { fontSize: 11, color: "#9ca3af", marginBottom: 8 },
+    driverCard:      { backgroundColor: "#fff", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8, borderWidth: 1, borderColor: "#e5e7eb" },
+    driverAvatar:    { width: 44, height: 44, borderRadius: 22, backgroundColor: "#dcfce7", alignItems: "center", justifyContent: "center" },
+    driverAvatarTxt: { fontSize: 18, fontWeight: "800", color: "#15803d" },
+    driverName:      { fontSize: 15, fontWeight: "700", color: "#111827" },
+    driverEmail:     { fontSize: 12, color: "#6b7280", marginTop: 2 },
+    driverBadge:     { backgroundColor: "#f0fdf4", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+    driverBadgeTxt:  { color: "#15803d", fontSize: 11, fontWeight: "700" },
 
     reviewAllBtn: { backgroundColor: "#15803d", borderRadius: 14, paddingVertical: 16, marginTop: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
     reviewAllTxt: { color: "white", fontWeight: "800", fontSize: 15 },

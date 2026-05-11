@@ -1,5 +1,6 @@
 /**
  * File: functions/src/index.ts
+ * Ensure you are running 'npm run build' or 'firebase deploy' from the /functions directory.
  * Deploy using: firebase deploy --only functions
  */
 

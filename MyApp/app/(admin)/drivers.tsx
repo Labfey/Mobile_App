@@ -1,15 +1,3 @@
-/**
- * app/(admin)/drivers.tsx
- *
- * FIXES applied:
- *  1. Deletion now uses Promise.allSettled() so a missing node (e.g. driver
- *     never had revenue) doesn't throw an error and show the error alert even
- *     when deletion was actually successful.
- *  2. setSelected(null) is called before the success Alert so the sheet
- *     closes cleanly before the dialog appears.
- *  3. The inner double-confirm Alert is preserved so admins don't delete by accident.
- */
-
 import React, { useEffect, useState } from "react";
 import {
     View, Text, ScrollView, StyleSheet, ActivityIndicator,

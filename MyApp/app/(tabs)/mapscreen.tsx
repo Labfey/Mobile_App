@@ -259,7 +259,11 @@ const router = useRouter();
               isDriver: liveRole === "driver", hasActiveRoute: liveDest !== null, isFull: liveIsFull,
             }));
           }
-          if (liveRole === "driver" && auth.currentUser) {
+          // Only broadcast location when a trip is actively running.
+          // Without this guard, the watcher re-adds the driver to Firebase
+          // immediately after endTripSilent removes them, so the trip never
+          // truly ends on other devices.
+          if (liveRole === "driver" && liveDest !== null && auth.currentUser) {
             update(ref(db, `jeeps/${auth.currentUser.uid}`), { latitude, longitude })
               .catch(err => console.log("Firebase update error:", err));
           }
@@ -281,7 +285,10 @@ const router = useRouter();
 
       if (webViewRef.current) {
         // Drivers must NOT see other drivers — send empty array for them.
-        const visibleJeeps = roleRef.current === "driver" ? [] : jeepsArray;
+        // Passengers only see jeeps that have an active destination (i.e. trip has started).
+        const visibleJeeps = roleRef.current === "driver"
+          ? []
+          : jeepsArray.filter((j: any) => j.destination);
         webViewRef.current.postMessage(JSON.stringify({ type: "SET_JEEPS", jeeps: visibleJeeps }));
       }
 
@@ -337,7 +344,7 @@ const router = useRouter();
   // ─────────────────────────────────────────────────────────────────────────────
 
   const postMessageToWebView = (message: any) => {
-    if (webViewRef.current && webViewLoaded) {
+    if (webViewRef.current && webViewLoadedRef.current) {       // ← use ref
       webViewRef.current.postMessage(JSON.stringify(message));
     }
   };
@@ -417,20 +424,47 @@ const router = useRouter();
   // ─────────────────────────────────────────────────────────────────────────────
 
   const endTripSilent = async () => {
+    // Clear UI and map zones immediately.
+    // Also null the ref directly — setCurrentDest is async and the ref-sync
+    // effect runs on the next render, so there is a brief window where the
+    // location watcher still sees the old destination and re-writes to Firebase.
+    // Nulling the ref here closes that race condition entirely.
+    currentDestRef.current = null;
     setCurrentDest(null);
     postMessageToWebView({ type: "CLEAR_ZONES" });
-    const isTracking = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-    if (isTracking) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+
+    // Stop background location — wrap so errors don't block Firebase cleanup
+    try {
+      const isTracking = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+      if (isTracking) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+    } catch (locationErr) {
+      console.log("Location stop skipped (non-critical):", locationErr);
+    }
+
     if (auth.currentUser) {
-      await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
+      // Remove the driver's live marker from the map — critical, wrap defensively
+      try {
+        await remove(ref(db, `jeeps/${auth.currentUser.uid}`));
+      } catch (removeErr) {
+        console.log("Jeep remove error:", removeErr);
+      }
+
+      // Close the active trip record
       if (currentTripIdRef.current) {
-        update(ref(db, `driver_trips/${auth.currentUser.uid}/${currentTripIdRef.current}`), { endTime: Date.now() }).catch(() => {});
+        update(
+          ref(db, `driver_trips/${auth.currentUser.uid}/${currentTripIdRef.current}`),
+          { endTime: Date.now() }
+        ).catch(() => {});
         currentTripIdRef.current = null;
       }
+
+      // Close the history entry
       if (currentHistoryKeyRef.current) {
-        const now = new Date();
+        const now        = new Date();
         const dateKey    = now.toISOString().split("T")[0];
-        const endTimeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+        const endTimeStr = now.toLocaleTimeString("en-US", {
+          hour: "2-digit", minute: "2-digit", hour12: true,
+        });
         await update(
           ref(db, `history/${auth.currentUser.uid}/${dateKey}/${currentHistoryKeyRef.current}`),
           { endTime: endTimeStr }
@@ -675,10 +709,28 @@ const router = useRouter();
         var currentDriverFull  = false;
         var passengerViewRoutes = [];
 
-        var fullRouteCoords = [];
-        var remainingBorder = null;
-        var remainingLayer  = null;
-        var remainingDashes = null;
+        var fullRouteCoords  = [];
+        var routeDestination = null;   // 'Town' | 'Balacbac' — used for zone colour direction
+
+        // Ghost baseline (full route, dimmed)
+        var ghostBorder  = null;
+        var ghostLine    = null;
+
+        // Trail behind the jeep (already travelled)
+        var trailBorder  = null;
+        var trailLine    = null;
+
+        // Ahead route split into 4 distance-based zone segments
+        var zoneRemLayers = [];
+
+        // Destination pin
+        var destMarker   = null;
+
+        // Passenger route view state — tracks which jeep is being viewed and
+        // caches its full route so live position updates can refresh the overlay
+        // without making a new OSRM request on every GPS tick.
+        var passengerViewJeepId     = null;
+        var passengerViewFullCoords = null;
 
         var ROUTE_WAYPOINTS_FWD = [
           [16.414019, 120.593455],
@@ -745,6 +797,61 @@ const router = useRouter();
           return { idx: bestIdx, lat: fullRouteCoords[bestIdx][0], lng: fullRouteCoords[bestIdx][1], dist: bestDist };
         }
 
+        // Generic snap — same algorithm as snapToRoute but works on any coords
+        // array instead of the global fullRouteCoords.  Used by passengers so
+        // they can snap a jeep's GPS to the fetched route without touching the
+        // driver's own route state.
+        function snapToCoords(dLat, dLng, coords) {
+          if (!coords || !coords.length) return null;
+          var bestIdx  = 0;
+          var bestDist = Infinity;
+          for (var i = 0; i < coords.length; i++) {
+            var d = haversineM(dLat, dLng, coords[i][0], coords[i][1]);
+            if (d < bestDist) { bestDist = d; bestIdx = i; }
+          }
+          if (bestIdx > 0) {
+            var A = coords[bestIdx-1];
+            var B = coords[bestIdx];
+            var abLat = B[0]-A[0], abLng = B[1]-A[1];
+            var len2  = abLat*abLat + abLng*abLng;
+            if (len2 > 0) {
+              var t = ((dLat-A[0])*abLat + (dLng-A[1])*abLng) / len2;
+              t = Math.max(0, Math.min(1, t));
+              var sLat = A[0]+t*abLat, sLng = A[1]+t*abLng;
+              var sDist = haversineM(dLat, dLng, sLat, sLng);
+              if (sDist < bestDist) return { idx: bestIdx, lat: sLat, lng: sLng, dist: sDist };
+            }
+          }
+          return { idx: bestIdx, lat: coords[bestIdx][0], lng: coords[bestIdx][1], dist: bestDist };
+        }
+
+        // Splits a coords array into n roughly equal-distance segments.
+        // Each segment starts at the last point of the previous one so lines connect.
+        function splitByDistance(coords, n) {
+          if (!coords || coords.length < 2) return [coords];
+          var totalDist = 0;
+          for (var i = 1; i < coords.length; i++) {
+            totalDist += haversineM(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1]);
+          }
+          var segSize  = totalDist / n;
+          var segments = [];
+          var current  = [coords[0]];
+          var accum    = 0;
+          var segIdx   = 0;
+          for (var i = 1; i < coords.length; i++) {
+            accum += haversineM(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1]);
+            current.push(coords[i]);
+            if (accum >= segSize * (segIdx + 1) && segIdx < n - 1) {
+              segments.push(current.slice());
+              current = [coords[i]]; // next zone shares the boundary point for continuity
+              segIdx++;
+            }
+          }
+          if (current.length > 0) segments.push(current);
+          while (segments.length < n) segments.push([]);
+          return segments;
+        }
+
         function updateDynamicRoute(driverLat, driverLng) {
           if (!fullRouteCoords.length || !hasActiveRoute) return null;
 
@@ -755,31 +862,86 @@ const router = useRouter();
           var sLat = snap.dist < SNAP_THRESHOLD ? snap.lat : driverLat;
           var sLng = snap.dist < SNAP_THRESHOLD ? snap.lng : driverLng;
 
-          var remaining = [[sLat, sLng]].concat(fullRouteCoords.slice(snap.idx));
-
-          if (remaining.length >= 2) {
-            if (!remainingBorder) {
-              remainingBorder = L.polyline(remaining, {
-                color: 'rgba(255,255,255,0.92)', weight: 12,
+          // ── 1. TRAIL — already-travelled portion (0 → snap point) ─────────────
+          // Grows behind the driver as they move, rendered as a muted dashed line.
+          var travelledCoords = fullRouteCoords.slice(0, snap.idx + 1).concat([[sLat, sLng]]);
+          if (travelledCoords.length >= 2) {
+            if (!trailBorder) {
+              trailBorder = L.polyline(travelledCoords, {
+                color: 'rgba(0,0,0,0.10)', weight: 10,
                 lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
               }).addTo(map);
-              remainingLayer = L.polyline(remaining, {
-                color: '#15803d', weight: 7, opacity: 0.96,
-                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
-              }).addTo(map);
-              remainingDashes = L.polyline(remaining, {
-                color: 'rgba(255,255,255,0.5)', weight: 3,
-                dashArray: '1, 16', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              trailLine = L.polyline(travelledCoords, {
+                color: 'rgba(120,120,120,0.40)', weight: 5,
+                dashArray: '5 9', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
               }).addTo(map);
             } else {
-              remainingBorder.setLatLngs(remaining);
-              remainingLayer.setLatLngs(remaining);
-              remainingDashes.setLatLngs(remaining);
+              trailBorder.setLatLngs(travelledCoords);
+              trailLine.setLatLngs(travelledCoords);
             }
           }
 
-          var end     = fullRouteCoords[fullRouteCoords.length - 1];
-          var distEnd = haversineM(sLat, sLng, end[0], end[1]);
+          // ── 2. AHEAD ROUTE — zone-coloured from driver position to destination ─
+          // Green (near) → Yellow → Orange → Red (far).
+          // Direction is flipped for Town-bound trips so the driver always sees
+          // green directly ahead and red at the far end.
+          var remaining = [[sLat, sLng]].concat(fullRouteCoords.slice(snap.idx));
+          if (remaining.length >= 2) {
+            var zc = routeDestination === 'Town'
+              ? ['#22c55e', '#eab308', '#f97316', '#ef4444']
+              : ['#ef4444', '#f97316', '#eab308', '#22c55e'];
+
+            var zones = splitByDistance(remaining, 4);
+
+            // Remove previous zone layers before redrawing
+            zoneRemLayers.forEach(function(l) { map.removeLayer(l); });
+            zoneRemLayers = [];
+
+            zones.forEach(function(seg, idx) {
+              if (!seg || seg.length < 2) return;
+              var col = zc[Math.min(idx, zc.length - 1)];
+              // Outer white shadow — gives the route depth and separates it from the map
+              zoneRemLayers.push(L.polyline(seg, {
+                color: 'rgba(255,255,255,0.95)', weight: 16,
+                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+              // Dark colour undercoat for a subtle 3-D shadow feel
+              zoneRemLayers.push(L.polyline(seg, {
+                color: 'rgba(0,0,0,0.18)', weight: 11,
+                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+              // Main zone-colour fill
+              zoneRemLayers.push(L.polyline(seg, {
+                color: col, weight: 8, opacity: 0.97,
+                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+              // Moving-dash overlay for a navigation feel
+              zoneRemLayers.push(L.polyline(seg, {
+                color: 'rgba(255,255,255,0.45)', weight: 3,
+                dashArray: '2 16', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+            });
+          }
+
+          // ── 3. DESTINATION MARKER — pin at the terminal, drawn once ───────────
+          if (!destMarker && fullRouteCoords.length > 0) {
+            var endPt = fullRouteCoords[fullRouteCoords.length - 1];
+            var destHtml =
+              '<div style="width:38px;height:38px;border-radius:50%;'
+              + 'background:linear-gradient(135deg,#15803d,#166534);'
+              + 'border:3px solid white;display:flex;align-items:center;justify-content:center;'
+              + 'box-shadow:0 4px 16px rgba(21,128,61,0.65),0 0 0 7px rgba(21,128,61,0.18);'
+              + 'font-size:17px;line-height:1;">'
+              + '\\uD83C\\uDFAF</div>';   // 🎯
+            destMarker = L.marker([endPt[0], endPt[1]], {
+              icon: L.divIcon({ className: '', html: destHtml, iconSize: [38,38], iconAnchor: [19,19] }),
+              zIndexOffset: 900,
+            }).addTo(map);
+          }
+
+          // ── 4. ARRIVAL DETECTION ───────────────────────────────────────────────
+          var endCoord = fullRouteCoords[fullRouteCoords.length - 1];
+          var distEnd  = haversineM(sLat, sLng, endCoord[0], endCoord[1]);
           if (distEnd < 40 && hasActiveRoute) {
             hasActiveRoute = false;
             if (window.ReactNativeWebView) {
@@ -791,16 +953,23 @@ const router = useRouter();
         }
 
         function clearDynamicRoute() {
-          if (remainingBorder) { map.removeLayer(remainingBorder); remainingBorder = null; }
-          if (remainingLayer)  { map.removeLayer(remainingLayer);  remainingLayer  = null; }
-          if (remainingDashes) { map.removeLayer(remainingDashes); remainingDashes = null; }
-          fullRouteCoords = [];
+          if (ghostBorder)  { map.removeLayer(ghostBorder);  ghostBorder  = null; }
+          if (ghostLine)    { map.removeLayer(ghostLine);    ghostLine    = null; }
+          if (trailBorder)  { map.removeLayer(trailBorder);  trailBorder  = null; }
+          if (trailLine)    { map.removeLayer(trailLine);    trailLine    = null; }
+          zoneRemLayers.forEach(function(l) { map.removeLayer(l); });
+          zoneRemLayers = [];
+          if (destMarker)   { map.removeLayer(destMarker);   destMarker   = null; }
+          fullRouteCoords  = [];
+          routeDestination = null;
         }
 
         function initDriverRoute(originLat, originLng, destination) {
           clearDynamicRoute();
           passengerViewRoutes.forEach(function(l) { map.removeLayer(l); });
           passengerViewRoutes = [];
+
+          routeDestination = destination;
 
           var corridorWaypoints = destination === 'Balacbac'
             ? ROUTE_WAYPOINTS_FWD.slice()
@@ -810,6 +979,18 @@ const router = useRouter();
             if (!coords) return;
             fullRouteCoords = coords;
             hasActiveRoute  = true;
+
+            // ── Ghost baseline: full route dimmed, drawn first so it sits
+            //    below the trail and zone layers in z-order.
+            ghostBorder = L.polyline(coords, {
+              color: 'rgba(0,0,0,0.08)', weight: 12,
+              lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+            }).addTo(map);
+            ghostLine = L.polyline(coords, {
+              color: 'rgba(160,160,160,0.35)', weight: 6,
+              dashArray: '6 10', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+            }).addTo(map);
+
             updateDynamicRoute(originLat, originLng);
             map.fitBounds(L.polyline(coords).getBounds(), { padding: [50, 50] });
           });
@@ -847,65 +1028,144 @@ const router = useRouter();
           return segs;
         }
 
-        // ── showJeepRoute ─────────────────────────────────────────────────────
-        // Called when a passenger taps a jeep bubble.
-        // Draws the remaining route ahead of the driver in zone colours.
+        // ── showJeepRoute ──────────────────────────────────────────────────────
+        // Called when a passenger taps a jeep marker.
+        // Visual language is identical to the driver's own view:
+        //   Layer 0-1  Ghost baseline  — full terminal→terminal route, dimmed grey
+        //   Layer 2-3  Trail           — already-travelled portion, muted dashed
+        //   Layer 4+   Ahead zones     — 4 equal-distance colour bands (green→red)
+        //   Jeep dot                   — glowing position marker
+        //   Dest marker                — 🎯 pin at the terminal
         //
-        // FIX: Removed all SHOW_FARE_MODAL postings. The info sheet that opens
-        // via JEEP_TAPPED (handled in React Native) is the correct UX. Posting
-        // SHOW_FARE_MODAL on top of it was opening two modals simultaneously.
+        // After the initial fetch, passengerViewJeepId / passengerViewFullCoords
+        // are cached so that SET_JEEPS updates can call updatePassengerRouteView
+        // and refresh layers 2+ without a new OSRM request.
         function showJeepRoute(jeepId) {
-          // Clear any previous passenger route lines
           passengerViewRoutes.forEach(function(r) { map.removeLayer(r); });
-          passengerViewRoutes = [];
+          passengerViewRoutes       = [];
+          passengerViewJeepId       = null;
+          passengerViewFullCoords   = null;
 
           var jeep = jeepsData[jeepId];
+          if (!jeep || !jeep.destination || !jeep.latitude || !jeep.longitude) return;
 
-          // If the jeep has no active position/destination, do nothing extra.
-          // The info sheet from JEEP_TAPPED will show the offline state.
-          if (!jeep || !jeep.destination || !jeep.latitude || !jeep.longitude) {
-            return;
-          }
-
-          // Corridor in the correct direction for this jeep's destination
           var corridor = jeep.destination === 'Balacbac'
             ? ROUTE_WAYPOINTS_FWD.slice()
             : ROUTE_WAYPOINTS_FWD.slice().reverse();
 
-          // Find nearest corridor waypoint to driver's current GPS
-          var nearestIdx  = 0;
-          var nearestDist = Infinity;
-          for (var i = 0; i < corridor.length; i++) {
-            var d = haversineM(jeep.latitude, jeep.longitude, corridor[i][0], corridor[i][1]);
-            if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+          // Single OSRM fetch — full terminal-to-terminal route
+          fetchRoute(corridor, function(fullCoords) {
+            if (!fullCoords) return;
+
+            // ── Layer 0-1: Ghost baseline (drawn first, stays fixed) ───────────
+            passengerViewRoutes.push(L.polyline(fullCoords, {
+              color: 'rgba(0,0,0,0.08)', weight: 12,
+              lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+            }).addTo(map));
+            passengerViewRoutes.push(L.polyline(fullCoords, {
+              color: 'rgba(160,160,160,0.35)', weight: 6,
+              dashArray: '6 10', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+            }).addTo(map));
+
+            // Cache for live updates — set AFTER ghost so index 0-1 are locked in
+            passengerViewJeepId     = jeepId;
+            passengerViewFullCoords = fullCoords;
+
+            // Draw trail + zones + markers using the shared helper
+            updatePassengerRouteView(jeepId);
+
+            map.fitBounds(L.polyline(fullCoords).getBounds(), { padding: [60, 60] });
+          });
+        }
+
+        // ── updatePassengerRouteView ───────────────────────────────────────────
+        // Refreshes layers 2+ (trail, zones, jeep dot, dest pin) in-place using
+        // cached fullCoords.  Called both by showJeepRoute (initial draw) and by
+        // the SET_JEEPS handler whenever the viewed jeep's position changes.
+        function updatePassengerRouteView(jeepId) {
+          var jeep = jeepsData[jeepId];
+          if (!jeep || !passengerViewFullCoords) return;
+
+          var fullCoords = passengerViewFullCoords;
+
+          // Remove everything after the two fixed ghost baseline layers
+          while (passengerViewRoutes.length > 2) {
+            map.removeLayer(passengerViewRoutes.pop());
           }
 
-          // Slice: only waypoints from nearest → destination
-          var remainingCorridor = corridor.slice(nearestIdx);
+          // Snap jeep GPS to the full route
+          var snap = snapToCoords(jeep.latitude, jeep.longitude, fullCoords);
+          if (!snap) return;
+          var SNAP_THRESHOLD = 80;
+          var sLat = snap.dist < SNAP_THRESHOLD ? snap.lat : jeep.latitude;
+          var sLng = snap.dist < SNAP_THRESHOLD ? snap.lng : jeep.longitude;
 
-          // Prepend driver's real GPS so the line starts exactly there
-          var fetchWaypoints = [[jeep.latitude, jeep.longitude]].concat(remainingCorridor);
+          // ── Trail (already-travelled: route start → snap point) ───────────────
+          var travelledCoords = fullCoords.slice(0, snap.idx + 1).concat([[sLat, sLng]]);
+          if (travelledCoords.length >= 2) {
+            passengerViewRoutes.push(L.polyline(travelledCoords, {
+              color: 'rgba(0,0,0,0.10)', weight: 10,
+              lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+            }).addTo(map));
+            passengerViewRoutes.push(L.polyline(travelledCoords, {
+              color: 'rgba(120,120,120,0.40)', weight: 5,
+              dashArray: '5 9', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+            }).addTo(map));
+          }
 
-          // Zone boundaries: intermediate remaining corridor waypoints
-          var boundaries = remainingCorridor.slice(1, remainingCorridor.length - 1);
-
-          var colors = ['#22c55e', '#eab308', '#f97316', '#ef4444'];
-          var zc = jeep.destination === 'Town' ? colors.slice().reverse() : colors;
-
-          fetchRoute(fetchWaypoints, function(coords) {
-            if (!coords) return;
-            var rawSegs = splitRouteIntoZones(coords, boundaries);
-            rawSegs.forEach(function(seg, idx) {
-              drawNavRoute(seg, zc[Math.min(idx, zc.length - 1)], passengerViewRoutes);
+          // ── Ahead zones (snap point → destination) ────────────────────────────
+          var remaining = [[sLat, sLng]].concat(fullCoords.slice(snap.idx));
+          if (remaining.length >= 2) {
+            var zc = jeep.destination === 'Town'
+              ? ['#22c55e', '#eab308', '#f97316', '#ef4444']
+              : ['#ef4444', '#f97316', '#eab308', '#22c55e'];
+            var zones = splitByDistance(remaining, 4);
+            zones.forEach(function(seg, idx) {
+              if (!seg || seg.length < 2) return;
+              var col = zc[Math.min(idx, zc.length - 1)];
+              passengerViewRoutes.push(L.polyline(seg, {
+                color: 'rgba(255,255,255,0.95)', weight: 16,
+                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+              passengerViewRoutes.push(L.polyline(seg, {
+                color: 'rgba(0,0,0,0.18)', weight: 11,
+                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+              passengerViewRoutes.push(L.polyline(seg, {
+                color: col, weight: 8, opacity: 0.97,
+                lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
+              passengerViewRoutes.push(L.polyline(seg, {
+                color: 'rgba(255,255,255,0.45)', weight: 3,
+                dashArray: '2 16', lineCap: 'round', lineJoin: 'round', smoothFactor: 1,
+              }).addTo(map));
             });
-            if (passengerViewRoutes.length > 0) {
-              var fills = passengerViewRoutes.filter(function(_, i) { return i % 3 === 2; });
-              if (fills.length) {
-                map.fitBounds(L.featureGroup(fills).getBounds(), { padding: [50, 50] });
-              }
-            }
-            // Route drawn. Info sheet already open from JEEP_TAPPED. Done.
-          });
+          }
+
+          // ── Jeep position dot ─────────────────────────────────────────────────
+          var jeepDotHtml =
+            '<div style="width:22px;height:22px;border-radius:50%;background:#22c55e;'
+            + 'border:3px solid white;'
+            + 'box-shadow:0 0 0 6px rgba(34,197,94,0.30),0 2px 10px rgba(0,0,0,0.28);">'
+            + '</div>';
+          passengerViewRoutes.push(L.marker([sLat, sLng], {
+            icon: L.divIcon({ className: '', html: jeepDotHtml, iconSize: [22,22], iconAnchor: [11,11] }),
+            zIndexOffset: 600,
+          }).addTo(map));
+
+          // ── Destination marker (🎯) ────────────────────────────────────────────
+          var endPt = fullCoords[fullCoords.length - 1];
+          var destHtml =
+            '<div style="width:38px;height:38px;border-radius:50%;'
+            + 'background:linear-gradient(135deg,#15803d,#166534);'
+            + 'border:3px solid white;display:flex;align-items:center;justify-content:center;'
+            + 'box-shadow:0 4px 16px rgba(21,128,61,0.65),0 0 0 7px rgba(21,128,61,0.18);'
+            + 'font-size:17px;line-height:1;">'
+            + '\\uD83C\\uDFAF</div>';
+          passengerViewRoutes.push(L.marker([endPt[0], endPt[1]], {
+            icon: L.divIcon({ className: '', html: destHtml, iconSize: [38,38], iconAnchor: [19,19] }),
+            zIndexOffset: 900,
+          }).addTo(map));
         }
 
         function updateRideRequestMarkers(requests) {
@@ -1018,7 +1278,9 @@ const router = useRouter();
             if (m.type === 'CLEAR_ZONES') {
               clearDynamicRoute();
               passengerViewRoutes.forEach(function(l) { map.removeLayer(l); });
-              passengerViewRoutes = [];
+              passengerViewRoutes       = [];
+              passengerViewJeepId       = null;
+              passengerViewFullCoords   = null;
               hasActiveRoute = false;
             }
 
@@ -1059,6 +1321,12 @@ const router = useRouter();
                   { permanent: false, direction: 'top', offset: [0,-28] }
                 );
               });
+
+              // If a passenger is viewing a jeep's route, refresh the trail
+              // and zone layers using the cached full route — no new OSRM fetch.
+              if (passengerViewJeepId && jeepsData[passengerViewJeepId]) {
+                updatePassengerRouteView(passengerViewJeepId);
+              }
             }
 
             if (m.type === 'SET_RIDE_REQUESTS') {
@@ -1469,17 +1737,27 @@ const router = useRouter();
         onCancel={() => setPassengerModalVisible(false)}
         onConfirm={async (groups: FareGroup[]) => {
           setPassengerModalVisible(false);
+
+          // Record revenue — non-critical; trip ends regardless of outcome
           if (auth.currentUser) {
-            const snap = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
-            const dName = snap.exists() ? (snap.val().driverName ?? "Unknown Driver") : "Unknown Driver";
-            await recordTripRevenue({
-              driverId:   auth.currentUser.uid,
-              driverName: dName,
-              groups,
-              route:      currentDest === "Town" ? "Balacbac–Town" : "Town–Balacbac",
-              tripId:     currentTripIdRef.current ?? `trip_${Date.now()}`,
-            });
+            try {
+              const snap  = await get(ref(db, `jeep_info/${auth.currentUser.uid}`));
+              const dName = snap.exists()
+                ? (snap.val().driverName ?? "Unknown Driver")
+                : "Unknown Driver";
+              await recordTripRevenue({
+                driverId:   auth.currentUser.uid,
+                driverName: dName,
+                groups,
+                route:  currentDest === "Town" ? "Balacbac–Town" : "Town–Balacbac",
+                tripId: currentTripIdRef.current ?? `trip_${Date.now()}`,
+              });
+            } catch (revenueErr) {
+              console.log("Revenue recording error (non-critical):", revenueErr);
+            }
           }
+
+          // Always end the trip even if revenue recording failed
           await endTripSilent();
         }}
       />

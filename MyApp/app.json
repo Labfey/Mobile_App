@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "MyApp",
-    "slug": "MyApp",
+    "name": "Jeep Route",
+    "slug": "Jeep Route",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -10,16 +10,16 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.labfey.MyApp",
+      "bundleIdentifier": "com.labfey.JeepRoute",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "JeepRoute needs your location to show you on the map.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "JeepRoute needs background location to track your jeep for passengers even when your screen is off.",
-        "NSLocationAlwaysUsageDescription": "JeepRoute needs background location to track your jeep for passengers even when your screen is off.",
+        "NSLocationWhenInUseUsageDescription": "Jeep Route needs your location to show you on the map.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Jeep Route needs background location to track your location for passengers even when your screen is off.",
+        "NSLocationAlwaysUsageDescription": "Jeep Route needs background location to track your location for passengers even when your screen is off.",
         "UIBackgroundModes": ["location", "fetch"]
       }
     },
     "android": {
-      "package": "com.labfey.MyApp",
+      "package": "com.labfey.JeepRoute",
       "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
@@ -43,7 +43,7 @@
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true,
           "foregroundService": {
-            "notificationTitle": "JeepRoute Tracking",
+            "notificationTitle": "Jeep Route Tracking",
             "notificationBody": "Location sharing is active.",
             "notificationColor": "#667EEA"
           }

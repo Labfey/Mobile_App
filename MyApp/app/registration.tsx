@@ -1,23 +1,16 @@
 /**
- * app/driver-registration.tsx
+ * app/registration.tsx
  *
- * USER-FACING driver application form.
- * Replaces the old /registration route that mistakenly opened the admin view.
+ * Driver application form — updated to include operator selection.
+ * Step 1 now fetches registered operators from Firebase and lets the
+ * applicant tap-to-select one. A "Not listed — enter manually" fallback
+ * is available if their operator isn't in the system yet.
  *
- * Steps:
- *  0 – Account Info   (name, email, password)
- *  1 – Professional   (license number, operator name)
- *  2 – Documents      (license photo, government ID photo via ImagePicker)
- *  3 – Terms of Service agreement
- *
- * On submit → creates a Firebase Auth account + writes to pending_registrations/
- * The account starts with role "pending_driver" so the admin can approve/reject.
- *
- * Install dependency if not already present:
- *   npx expo install expo-image-picker
+ * The selected operatorId is stored in both users/ and
+ * pending_registrations/ so the admin can link driver → operator.
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
     View, Text, TextInput, TouchableOpacity, ScrollView,
     Alert, ActivityIndicator, StyleSheet, Image,
@@ -28,15 +21,24 @@ import { useRouter } from "expo-router";
 import {
     ArrowLeft, ArrowRight, User, Mail, Lock,
     CreditCard, Camera, Check, Building2, FileText, Shield,
+    MapPin,
 } from "lucide-react-native";
 import * as ImagePicker from "expo-image-picker";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { auth, db, ref } from "../services/firebase";
-import { set, update } from "firebase/database";
+import { auth, db, ref, onValue } from "../services/firebase";
+import { set } from "firebase/database";
 
 const { width } = Dimensions.get("window");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Operator {
+    id: string;
+    name: string;
+    address?: string;
+    contactNumber?: string;
+    status: string;
+}
 
 interface FormState {
     // Step 0
@@ -46,7 +48,8 @@ interface FormState {
     confirmPassword: string;
     // Step 1
     licenseNumber: string;
-    operatorName: string;
+    operatorId: string;       // Firebase key of selected operator
+    operatorName: string;     // Display name (selected or manually typed)
     // Step 2
     licenseImageUri: string | null;
     idImageUri: string | null;
@@ -67,19 +70,18 @@ async function pickImage(): Promise<string | null> {
     const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         quality: 0.6,
-        base64: true,           // stored in Realtime DB as data URI
+        base64: true,
         allowsEditing: true,
         aspect: [4, 3],
     });
     if (result.canceled || !result.assets[0]) return null;
     const { base64, uri, mimeType } = result.assets[0];
-    // Prefer base64 so it survives across devices; fall back to local URI
     return base64
         ? `data:${mimeType ?? "image/jpeg"};base64,${base64}`
         : uri;
 }
 
-// ─── Step Components ──────────────────────────────────────────────────────────
+// ─── Step Indicator ───────────────────────────────────────────────────────────
 
 function StepIndicator({ step }: { step: number }) {
     return (
@@ -145,9 +147,31 @@ export default function DriverRegistration() {
     const [step, setStep] = useState(0);
     const [submitting, setSubmitting] = useState(false);
 
+    // ── Operator list from Firebase ───────────────────────────────────────────
+    const [operators, setOperators]           = useState<Operator[]>([]);
+    const [operatorsLoading, setOperatorsLoading] = useState(true);
+    const [showManualEntry, setShowManualEntry]   = useState(false);
+
+    useEffect(() => {
+        const unsub = onValue(ref(db, "operators"), (snap) => {
+            if (snap.exists()) {
+                const list: Operator[] = Object.entries(snap.val())
+                    .filter(([_, v]: any) => v.status === "active")
+                    .map(([id, v]: any) => ({ id, ...v }))
+                    .sort((a: Operator, b: Operator) => a.name.localeCompare(b.name));
+                setOperators(list);
+            } else {
+                setOperators([]);
+            }
+            setOperatorsLoading(false);
+        });
+        return () => unsub();
+    }, []);
+
+    // ── Form state ────────────────────────────────────────────────────────────
     const [form, setForm] = useState<FormState>({
         fullName: "", email: "", password: "", confirmPassword: "",
-        licenseNumber: "", operatorName: "",
+        licenseNumber: "", operatorId: "", operatorName: "",
         licenseImageUri: null, idImageUri: null,
         agreedToTos: false,
     });
@@ -166,7 +190,7 @@ export default function DriverRegistration() {
         }
         if (step === 1) {
             if (!form.licenseNumber.trim())      { Alert.alert("Required", "Please enter your license number."); return false; }
-            if (!form.operatorName.trim())       { Alert.alert("Required", "Please enter your operator / franchise name."); return false; }
+            if (!form.operatorName.trim())       { Alert.alert("Required", "Please select or enter your operator."); return false; }
         }
         if (step === 2) {
             if (!form.licenseImageUri)           { Alert.alert("Required", "Please upload a photo of your driver's license."); return false; }
@@ -187,25 +211,24 @@ export default function DriverRegistration() {
         if (!validateStep()) return;
         setSubmitting(true);
         try {
-            // Create Firebase Auth account
             const cred = await createUserWithEmailAndPassword(auth, form.email.trim(), form.password);
             const uid  = cred.user.uid;
 
-            // Write user record (role = pending_driver so they can't log in yet)
             await set(ref(db, `users/${uid}`), {
                 username:      form.fullName.trim(),
                 email:         form.email.trim(),
                 role:          "pending_driver",
                 operatorName:  form.operatorName.trim(),
+                operatorId:    form.operatorId || null,
                 createdAt:     Date.now(),
             });
 
-            // Write pending registration for admin review
             await set(ref(db, `pending_registrations/${uid}`), {
                 fullName:      form.fullName.trim(),
                 email:         form.email.trim(),
                 licenseNumber: form.licenseNumber.trim(),
                 operatorName:  form.operatorName.trim(),
+                operatorId:    form.operatorId || null,
                 licenseImage:  form.licenseImageUri ?? "",
                 idImage:       form.idImageUri ?? "",
                 status:        "pending",
@@ -264,22 +287,136 @@ export default function DriverRegistration() {
                 return (
                     <View style={st.stepBody}>
                         <Text style={st.stepTitle}>Professional Details</Text>
-                        <Text style={st.stepSub}>Enter your license and operator information.</Text>
+                        <Text style={st.stepSub}>Enter your license number and select your operator.</Text>
 
                         <FieldLabel>Driver&apos;s License Number *</FieldLabel>
                         <InputRow icon={<CreditCard color="#9ca3af" size={18} />} value={form.licenseNumber}
                             onChangeText={v => set_("licenseNumber", v)} placeholder="e.g. A01-23-456789"
                             cap="characters" />
 
-                        <FieldLabel>Operator / Franchise Name *</FieldLabel>
-                        <InputRow icon={<Building2 color="#9ca3af" size={18} />} value={form.operatorName}
-                            onChangeText={v => set_("operatorName", v)} placeholder="e.g. Juan Dela Cruz Transport"
-                            cap="words" />
+                        <FieldLabel>Operator / Franchise *</FieldLabel>
 
-                        <View style={st.infoBox}>
+                        {operatorsLoading ? (
+                            <View style={st.operatorLoading}>
+                                <ActivityIndicator color="#15803d" size="small" />
+                                <Text style={st.operatorLoadingTxt}>Loading registered operators…</Text>
+                            </View>
+                        ) : operators.length === 0 ? (
+                            /* No operators in DB → fall straight to manual entry */
+                            <>
+                                <View style={st.infoBox}>
+                                    <FileText color="#6b7280" size={14} />
+                                    <Text style={st.infoTxt}>
+                                        No registered operators found yet. Please enter your operator manually.
+                                    </Text>
+                                </View>
+                                <InputRow
+                                    icon={<Building2 color="#9ca3af" size={18} />}
+                                    value={form.operatorName}
+                                    onChangeText={v => { set_("operatorName", v); set_("operatorId", ""); }}
+                                    placeholder="e.g. Juan Dela Cruz Transport"
+                                    cap="words"
+                                />
+                            </>
+                        ) : (
+                            <>
+                                <Text style={st.operatorPickerHint}>
+                                    Tap your operator to select it:
+                                </Text>
+
+                                {/* Registered operators list */}
+                                {operators.map(op => {
+                                    const selected = form.operatorId === op.id;
+                                    return (
+                                        <TouchableOpacity
+                                            key={op.id}
+                                            onPress={() => {
+                                                set_("operatorId", op.id);
+                                                set_("operatorName", op.name);
+                                                setShowManualEntry(false);
+                                            }}
+                                            style={[st.operatorCard, selected && st.operatorCardSelected]}
+                                            activeOpacity={0.7}
+                                        >
+                                            <View style={[
+                                                st.operatorIcon,
+                                                { backgroundColor: selected ? "#dcfce7" : "#f3f4f6" },
+                                            ]}>
+                                                <Building2
+                                                    color={selected ? "#15803d" : "#9ca3af"}
+                                                    size={18}
+                                                />
+                                            </View>
+                                            <View style={{ flex: 1 }}>
+                                                <Text style={[
+                                                    st.operatorCardName,
+                                                    selected && { color: "#15803d" },
+                                                ]}>
+                                                    {op.name}
+                                                </Text>
+                                                {!!op.address && (
+                                                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 3 }}>
+                                                        <MapPin size={10} color="#9ca3af" />
+                                                        <Text style={st.operatorCardAddr} numberOfLines={1}>
+                                                            {op.address}
+                                                        </Text>
+                                                    </View>
+                                                )}
+                                            </View>
+                                            {selected && (
+                                                <View style={st.operatorCheck}>
+                                                    <Check color="white" size={14} />
+                                                </View>
+                                            )}
+                                        </TouchableOpacity>
+                                    );
+                                })}
+
+                                {/* "Not listed" toggle */}
+                                <TouchableOpacity
+                                    onPress={() => {
+                                        const next = !showManualEntry;
+                                        setShowManualEntry(next);
+                                        if (next) {
+                                            // Clear any previously selected operator
+                                            set_("operatorId", "");
+                                            set_("operatorName", "");
+                                        }
+                                    }}
+                                    style={[st.operatorCard, showManualEntry && st.operatorCardManual]}
+                                    activeOpacity={0.7}
+                                >
+                                    <View style={[st.operatorIcon, { backgroundColor: showManualEntry ? "#fef3c7" : "#f3f4f6" }]}>
+                                        <Text style={{ fontSize: 16 }}>✏️</Text>
+                                    </View>
+                                    <Text style={[
+                                        st.operatorCardName,
+                                        { color: showManualEntry ? "#d97706" : "#6b7280" },
+                                    ]}>
+                                        Not listed — enter manually
+                                    </Text>
+                                </TouchableOpacity>
+
+                                {/* Manual text input — shown when toggle is active */}
+                                {showManualEntry && (
+                                    <InputRow
+                                        icon={<Building2 color="#9ca3af" size={18} />}
+                                        value={form.operatorName}
+                                        onChangeText={v => {
+                                            set_("operatorName", v);
+                                            set_("operatorId", "");
+                                        }}
+                                        placeholder="e.g. Juan Dela Cruz Transport"
+                                        cap="words"
+                                    />
+                                )}
+                            </>
+                        )}
+
+                        <View style={[st.infoBox, { marginTop: 16 }]}>
                             <FileText color="#6b7280" size={14} />
                             <Text style={st.infoTxt}>
-                                Your operator / franchise name must match your franchise certificate issued by the LTFRB.
+                                Your operator name must match your operator certificate issued by the Jeepney Management.
                             </Text>
                         </View>
                     </View>
@@ -292,7 +429,6 @@ export default function DriverRegistration() {
                         <Text style={st.stepTitle}>Upload Documents</Text>
                         <Text style={st.stepSub}>Photos must be clear and legible. Admin will verify these before approval.</Text>
 
-                        {/* License Photo */}
                         <FieldLabel>Driver&apos;s License Photo *</FieldLabel>
                         <TouchableOpacity
                             style={[st.uploadBox, form.licenseImageUri && st.uploadBoxDone]}
@@ -312,7 +448,6 @@ export default function DriverRegistration() {
                             )}
                         </TouchableOpacity>
 
-                        {/* Government ID Photo */}
                         <FieldLabel>Government ID Photo *</FieldLabel>
                         <TouchableOpacity
                             style={[st.uploadBox, form.idImageUri && st.uploadBoxDone]}
@@ -362,7 +497,7 @@ export default function DriverRegistration() {
                                     "Driver's license number",
                                     "Photo of your driver's license",
                                     "Photo of a government-issued ID",
-                                    "Operator / franchise name",
+                                    "Operator",
                                 ].map(item => (
                                     <Text key={item} style={st.tosBullet}>• {item}</Text>
                                 ))}
@@ -401,7 +536,7 @@ export default function DriverRegistration() {
                             </ScrollView>
                         </View>
 
-                        {/* Summary of submitted info */}
+                        {/* Summary */}
                         <View style={st.summaryBox}>
                             <Text style={st.summaryTitle}>Submitting as:</Text>
                             <Text style={st.summaryRow}><Text style={st.summaryKey}>Name: </Text>{form.fullName}</Text>
@@ -438,7 +573,6 @@ export default function DriverRegistration() {
 
     return (
         <SafeAreaView style={st.container}>
-            {/* Header */}
             <View style={st.header}>
                 <TouchableOpacity
                     onPress={() => (step === 0 ? router.back() : back())}
@@ -466,7 +600,6 @@ export default function DriverRegistration() {
                 >
                     {renderStep()}
 
-                    {/* Navigation buttons */}
                     <View style={st.navRow}>
                         {step < 3 ? (
                             <TouchableOpacity style={st.nextBtn} onPress={next} activeOpacity={0.85}>
@@ -504,57 +637,80 @@ const st = StyleSheet.create({
     headerSub:  { fontSize: 12, color: "#6b7280", marginTop: 1 },
 
     // Step indicator
-    indicatorRow:       { flexDirection: "row", paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#f3f4f6" },
-    indicatorItem:      { flex: 1, alignItems: "center", position: "relative" },
-    indicatorDot:       { width: 24, height: 24, borderRadius: 12, backgroundColor: "#e5e7eb", alignItems: "center", justifyContent: "center", marginBottom: 4 },
-    indicatorDotActive: { backgroundColor: "#15803d" },
-    indicatorNum:       { fontSize: 11, fontWeight: "700", color: "#9ca3af" },
-    indicatorLabel:     { fontSize: 9, color: "#9ca3af", fontWeight: "600", textAlign: "center" },
+    indicatorRow:        { flexDirection: "row", paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#f3f4f6" },
+    indicatorItem:       { flex: 1, alignItems: "center", position: "relative" },
+    indicatorDot:        { width: 24, height: 24, borderRadius: 12, backgroundColor: "#e5e7eb", alignItems: "center", justifyContent: "center", marginBottom: 4 },
+    indicatorDotActive:  { backgroundColor: "#15803d" },
+    indicatorNum:        { fontSize: 11, fontWeight: "700", color: "#9ca3af" },
+    indicatorLabel:      { fontSize: 9, color: "#9ca3af", fontWeight: "600", textAlign: "center" },
     indicatorLabelActive:{ color: "#15803d" },
-    indicatorLine:      { position: "absolute", top: 12, left: "60%", right: "-60%", height: 2, backgroundColor: "#e5e7eb" },
-    indicatorLineActive:{ backgroundColor: "#15803d" },
+    indicatorLine:       { position: "absolute", top: 12, left: "60%", right: "-60%", height: 2, backgroundColor: "#e5e7eb" },
+    indicatorLineActive: { backgroundColor: "#15803d" },
 
     scrollContent: { padding: 20, paddingBottom: 40 },
 
-    // Step body
     stepBody:  { marginBottom: 8 },
     stepTitle: { fontSize: 22, fontWeight: "800", color: "#111827", marginBottom: 6 },
     stepSub:   { fontSize: 13, color: "#6b7280", marginBottom: 24, lineHeight: 20 },
 
-    // Field
     fieldLabel: { fontSize: 11, fontWeight: "700", color: "#374151", textTransform: "uppercase", marginBottom: 8, marginTop: 16 },
     inputRow:   { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 14, borderWidth: 1, borderColor: "#e5e7eb" },
     input:      { flex: 1, fontSize: 15, color: "#111827" },
 
+    // ── Operator picker ───────────────────────────────────────────────────────
+    operatorLoading:    { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 20, justifyContent: "center" },
+    operatorLoadingTxt: { fontSize: 13, color: "#9ca3af" },
+    operatorPickerHint: { fontSize: 12, color: "#6b7280", marginBottom: 10, marginTop: 4 },
+
+    operatorCard: {
+        flexDirection: "row", alignItems: "center", gap: 12,
+        backgroundColor: "#fff", borderRadius: 14, padding: 14, marginBottom: 10,
+        borderWidth: 1.5, borderColor: "#e5e7eb",
+    },
+    operatorCardSelected: {
+        borderColor: "#15803d", backgroundColor: "#f0fdf4",
+    },
+    operatorCardManual: {
+        borderColor: "#d97706", backgroundColor: "#fffbeb",
+    },
+    operatorIcon: {
+        width: 40, height: 40, borderRadius: 12,
+        alignItems: "center", justifyContent: "center", flexShrink: 0,
+    },
+    operatorCardName: { fontSize: 14, fontWeight: "700", color: "#111827" },
+    operatorCardAddr: { fontSize: 11, color: "#9ca3af" },
+    operatorCheck: {
+        width: 26, height: 26, borderRadius: 13, backgroundColor: "#15803d",
+        alignItems: "center", justifyContent: "center", flexShrink: 0,
+    },
+
     // Upload
-    uploadBox:  { backgroundColor: "#fff", borderRadius: 16, borderWidth: 2, borderColor: "#e5e7eb", borderStyle: "dashed", height: 140, alignItems: "center", justifyContent: "center", overflow: "hidden" },
+    uploadBox:     { backgroundColor: "#fff", borderRadius: 16, borderWidth: 2, borderColor: "#e5e7eb", borderStyle: "dashed", height: 140, alignItems: "center", justifyContent: "center", overflow: "hidden" },
     uploadBoxDone: { borderStyle: "solid", borderColor: "#15803d" },
     uploadPreview: { width: "100%", height: "100%", resizeMode: "cover" },
-    uploadLabel:{ fontSize: 14, fontWeight: "700", color: "#15803d", marginTop: 10 },
-    uploadHint: { fontSize: 11, color: "#9ca3af", marginTop: 4 },
-    uploadBadge:{ position: "absolute", top: 8, right: 8, backgroundColor: "#15803d", borderRadius: 12, padding: 4 },
+    uploadLabel:   { fontSize: 14, fontWeight: "700", color: "#15803d", marginTop: 10 },
+    uploadHint:    { fontSize: 11, color: "#9ca3af", marginTop: 4 },
+    uploadBadge:   { position: "absolute", top: 8, right: 8, backgroundColor: "#15803d", borderRadius: 12, padding: 4 },
 
     // Info box
-    infoBox:   { flexDirection: "row", alignItems: "flex-start", gap: 8, backgroundColor: "#f8fafc", borderRadius: 12, padding: 12, marginTop: 20 },
+    infoBox:   { flexDirection: "row", alignItems: "flex-start", gap: 8, backgroundColor: "#f8fafc", borderRadius: 12, padding: 12 },
     infoTxt:   { flex: 1, fontSize: 12, color: "#6b7280", lineHeight: 18 },
 
     // ToS
-    tosBox:    { backgroundColor: "#fff", borderRadius: 14, borderWidth: 1, borderColor: "#e5e7eb", padding: 16, marginBottom: 16 },
-    tosSection:{ fontSize: 13, fontWeight: "800", color: "#111827", marginTop: 14, marginBottom: 4 },
-    tosPara:   { fontSize: 12, color: "#6b7280", lineHeight: 18, marginBottom: 4 },
-    tosBullet: { fontSize: 12, color: "#6b7280", lineHeight: 18, paddingLeft: 8 },
-
-    summaryBox:{ backgroundColor: "#f0fdf4", borderRadius: 14, padding: 14, marginBottom: 16 },
+    tosBox:      { backgroundColor: "#fff", borderRadius: 14, borderWidth: 1, borderColor: "#e5e7eb", padding: 16, marginBottom: 16 },
+    tosSection:  { fontSize: 13, fontWeight: "800", color: "#111827", marginTop: 14, marginBottom: 4 },
+    tosPara:     { fontSize: 12, color: "#6b7280", lineHeight: 18, marginBottom: 4 },
+    tosBullet:   { fontSize: 12, color: "#6b7280", lineHeight: 18, paddingLeft: 8 },
+    summaryBox:  { backgroundColor: "#f0fdf4", borderRadius: 14, padding: 14, marginBottom: 16 },
     summaryTitle:{ fontSize: 12, fontWeight: "800", color: "#15803d", marginBottom: 8 },
-    summaryRow: { fontSize: 12, color: "#374151", marginBottom: 4, lineHeight: 18 },
-    summaryKey: { fontWeight: "700" },
+    summaryRow:  { fontSize: 12, color: "#374151", marginBottom: 4, lineHeight: 18 },
+    summaryKey:  { fontWeight: "700" },
 
-    tosCheckRow:  { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: 4 },
-    checkbox:     { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: "#d1d5db", alignItems: "center", justifyContent: "center", marginTop: 2, flexShrink: 0 },
+    tosCheckRow:     { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: 4 },
+    checkbox:        { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: "#d1d5db", alignItems: "center", justifyContent: "center", marginTop: 2, flexShrink: 0 },
     checkboxChecked: { backgroundColor: "#15803d", borderColor: "#15803d" },
-    tosCheckLabel:{ flex: 1, fontSize: 13, color: "#374151", lineHeight: 20 },
+    tosCheckLabel:   { flex: 1, fontSize: 13, color: "#374151", lineHeight: 20 },
 
-    // Nav
     navRow:    { marginTop: 28 },
     nextBtn:   { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#15803d", borderRadius: 16, paddingVertical: 16 },
     nextBtnTxt:{ color: "white", fontWeight: "800", fontSize: 16 },
