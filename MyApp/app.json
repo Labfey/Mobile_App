@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Jeep Route",
-    "slug": "Jeep Route",
+    "slug": "MyApp",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -15,7 +15,10 @@
         "NSLocationWhenInUseUsageDescription": "Jeep Route needs your location to show you on the map.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Jeep Route needs background location to track your location for passengers even when your screen is off.",
         "NSLocationAlwaysUsageDescription": "Jeep Route needs background location to track your location for passengers even when your screen is off.",
-        "UIBackgroundModes": ["location", "fetch"]
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ]
       }
     },
     "android": {
@@ -70,6 +73,7 @@
       "eas": {
         "projectId": "b27eab20-643c-4e06-bcc9-2fc4059a268d"
       }
-    }
+    },
+    "owner": "labfey"
   }
 }

@@ -8,6 +8,25 @@
   "client": [
     {
       "client_info": {
+        "mobilesdk_app_id": "1:392669265278:android:49b76669acdbff05e8c72f",
+        "android_client_info": {
+          "package_name": "com.labfey.JeepRoute"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAbfdmnTEpXTvtYE_RvvUJZi1i71FNvGMQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:392669265278:android:f1dbfef1bea97b22e8c72f",
         "android_client_info": {
           "package_name": "com.labfey.MyApp"
