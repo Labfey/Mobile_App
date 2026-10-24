@@ -138,6 +138,15 @@ export default function AdminLayout() {
                 }}
             />
 
+                        {/* ── Simulation ──────────────────────────────────────────────── */}
+            <Tabs.Screen
+                name="simulation"
+                options={{
+                    title: "Simulate",
+                    tabBarIcon: ({ color }) => <FontAwesome name="play-circle-o" size={22} color={color} />,
+                }}
+            />
+
             {/* Hidden screens */}
             <Tabs.Screen name="revenue"  options={{ href: null }} />
             <Tabs.Screen name="history"  options={{ href: null }} />

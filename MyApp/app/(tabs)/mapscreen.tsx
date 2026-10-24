@@ -110,6 +110,15 @@ interface ExtendedZone {
 
 export default function MapScreen() {
 
+  const CARTO_API_KEY =
+  process.env.EXPO_PUBLIC_CARTO_API_KEY?.trim();
+
+if (!CARTO_API_KEY) {
+  console.error(
+    "CARTO API key is missing. Check your .env file."
+  );
+}
+
 const router = useRouter();
 
   useEffect(() => {
@@ -697,8 +706,14 @@ const router = useRouter();
           zoomControl: false, attributionControl: false, preferCanvas: true
         }).setView([16.4023, 120.5960], 14);
 
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
-        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+L.tileLayer(
+  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=${CARTO_API_KEY}',
+  {
+    maxZoom: 19
+  }
+).addTo(map);
+
 
         var userMarker         = null;
         var jeepMarkers        = {};
